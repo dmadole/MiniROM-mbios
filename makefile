@@ -1,12 +1,24 @@
 
 mini: mbios.asm
-	asm02 -L -b -D1802MINI mbios.asm
-	rm mbios.build
+	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
+	asm02 -L -b -D1802MINI mbios.tmp
+	@rm mbios.build mbios.tmp
 
 superelf: mbios.asm
-	asm02 -L -b -DSUPERELF mbios.asm
-	rm mbios.build
+	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
+	asm02 -L -b -DSUPERELF mbios.tmp
+	@rm mbios.build mbios.tmp
+
+rc1802: mbios.asm
+	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
+	asm02 -L -b -DRC1802 mbios.tmp
+	@rm mbios.build mbios.tmp
+
+maximize: mbios.asm
+	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
+	asm02 -L -b -DMAXIMIZE mbios.tmp
+	@rm mbios.build mbios.tmp
 
 clean:
-	-rm mbios.bin mbios.lst
+	@rm -f mbios.bin mbios.lst
 
