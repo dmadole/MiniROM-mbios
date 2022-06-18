@@ -14,31 +14,85 @@
 ;  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
-            ; Hadware and Build Target Definitions
+            ; Hardware and Build Target Definitions
 
-#define IDE_SELECT   2                  ; ide interface address port
-#define IDE_DATA     3                  ; ide interface data port
-#define IDE_SETTLE   500                ; milliseconds delay before booting
-#define BRMK         bn2                ; branch on serial mark
-#define BRSP         b2                 ; branch on serial space
-#define SEMK         seq                ; set serial mark
-#define SESP         req                ; set serial space
-#define UART_DATA    6                  ; uart data port
-#define UART_STATUS  7                  ; uart status/command port
-#define 1854_DETECT                     ; use uart if no bit-bang cable
-#define EXP_PORT     1                  ; group i/o expander port
-#define RTC_PORT     5                  ; real time clock port
+#define NO_GROUP       0                ; hardware defined - do not change
+
+#define IDE_SETTLE     500              ; milliseconds delay before booting
+#define UART_DETECT                     ; use uart if no bit-bang cable
 #define INIT_CON                        ; initialize console before booting
 
 #ifdef 1802MINI
-#define SET_BAUD     19200              ; bit-bang serial fixed baud rate
-#define FREQ_KHZ     4000               ; default processor clock frequency
+  #define BRMK         bn2              ; branch on serial mark
+  #define BRSP         b2               ; branch on serial space
+  #define SEMK         seq              ; set serial mark
+  #define SESP         req              ; set serial space
+  #define EXP_PORT     1                ; group i/o expander port
+  #define IDE_GROUP    0                ; ide interface group
+  #define IDE_SELECT   2                ; ide interface address port
+  #define IDE_DATA     3                ; ide interface data port
+  #define RTC_GROUP    0                ; real time clock group
+  #define RTC_PORT     5                ; real time clock port
+  #define UART_GROUP   0                ; uart port group
+  #define UART_DATA    6                ; uart data port
+  #define UART_STATUS  7                ; uart status/command port
+  #define SET_BAUD     19200            ; bit-bang serial fixed baud rate
+  #define FREQ_KHZ     4000             ; default processor clock frequency
 #endif
 
 #ifdef SUPERELF
-#define SET_BAUD     9600               ; bit-bang serial fixed baud rate
-#define FREQ_KHZ     1790               ; default processor clock frequency
+  #define BRMK         bn2              ; branch on serial mark
+  #define BRSP         b2               ; branch on serial space
+  #define SEMK         seq              ; set serial mark
+  #define SESP         req              ; set serial space
+  #define EXP_PORT     5                ; group i/o expander port
+  #define IDE_GROUP    0                ; ide interface group
+  #define IDE_SELECT   2                ; ide interface address port
+  #define IDE_DATA     3                ; ide interface data port
+  #define RTC_GROUP    1                ; real time clock group
+  #define RTC_PORT     3                ; real time clock port
+  #define UART_GROUP   0                ; uart port group
+  #define UART_DATA    6                ; uart data port
+  #define UART_STATUS  7                ; uart status/command port
+  #define SET_BAUD     9600             ; bit-bang serial fixed baud rate
+  #define FREQ_KHZ     1790             ; default processor clock frequency
 #endif
+
+#ifdef RC1802
+  #define BRMK         bn3              ; branch on serial mark
+  #define BRSP         b3               ; branch on serial space
+  #define SEMK         seq              ; set serial mark
+  #define SESP         req              ; set serial space
+  #define EXP_PORT     1                ; group i/o expander port
+  #define IDE_GROUP    1                ; ide interface group
+  #define IDE_SELECT   2                ; ide interface address port
+  #define IDE_DATA     3                ; ide interface data port
+  #define RTC_GROUP    2                ; real time clock group
+  #define RTC_PORT     3                ; real time clock port
+  #define UART_GROUP   0                ; uart port group
+  #define UART_DATA    2                ; uart data port
+  #define UART_STATUS  3                ; uart status/command port
+  #define SET_BAUD     19200            ; bit-bang serial fixed baud rate
+  #define FREQ_KHZ     4000             ; default processor clock frequency
+#endif
+
+#ifdef MAXIMIZE
+  #define BRMK         bn2              ; branch on serial mark
+  #define BRSP         b2               ; branch on serial space
+  #define SEMK         seq              ; set serial mark
+  #define SESP         req              ; set serial space
+  #define EXP_PORT     5                ; group i/o expander port
+  #define IDE_GROUP    1                ; ide interface group
+  #define IDE_SELECT   2                ; ide interface address port
+  #define IDE_DATA     3                ; ide interface data port
+  #define RTC_GROUP    2                ; real time clock group
+  #define RTC_PORT     3                ; real time clock port
+  #define UART_GROUP   4                ; uart port group
+  #define UART_DATA    6                ; uart data port
+  #define UART_STATUS  7                ; uart status/command port
+  #define FREQ_KHZ     4000             ; default processor clock frequency
+#endif
+
 
 
             ; SCALL Register Usage
@@ -69,8 +123,8 @@ k_clkfreq:  equ   0470h                 ; processor clock frequency in khz
 
 
             ; Do some basic initialization. Branching to initcall will setup
-            ; R4 and R5 for SCALL, and then sets the PC to R3 when it returns
-            ; via the SRET routine. Need a basic stack to start also.
+            ; R4 and R5 for SCALL, R2 as stack pointer, and finally, R3 as PC
+            ; when it returns via SRET.
 
 sysinit:    ldi   chkdevs.1             ; return address for initcall
             phi   r6
@@ -115,18 +169,48 @@ chkdevs:    ldi   devbits.1             ; pointer to memory variables
             ; reading an unused port normally returns the INP instruction
             ; opcode due to bus capacitance from the fetch machine cycle.
 
+            ; Discovery of UART is done by looking for 110XXXX0 pattern in
+            ; status register which should be present once the DA flag is
+            ; cleared by reading the data register.
+
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT
+            db    UART_GROUP
+            sex   r2
+          #endif
+
+            inp   UART_DATA             ; clear all possible status bits
+            inp   UART_STATUS
+
+            inp   UART_STATUS           ; check status register bits we can
+            ani   0e1h                  ;  reliably know
+            xri   0c0h
+            bnz   findrtc
+
+            ldn   ra                    ; looks like uart is present
+            ori   (1<<3)
+            str   ra
+
+
             ; Check for the RTC by looking for XXXX000X at the RTC month
             ; tens digit. Since it can only be 0 or 1 those zero bits will
             ; always be present even if the clock is not setup right.
 
-            sex   r3                    ; select rtc month msd register
+findrtc:    sex   r3                    ; select rtc month msd register
+
+          #if RTC_GROUP != UART_GROUP
+            out   EXP_PORT
+            db    RTC_GROUP
+          #endif
+
             out   RTC_PORT
             db    29h
 
             sex   r2                    ; look for xxxx000x data
             inp   RTC_PORT
             ani   0eh
-            bnz   uartchk
+            bnz   savefrq
 
             ldn   ra                    ; looks like rtc is present
             ori   (1<<4)
@@ -231,23 +315,6 @@ hzratio:    glo   rb                    ; multiply by 2 while moving to rf
             bnz   hzratio
 
 
-            ; Discovery of UART is done by looking for 110XXXX0 pattern in
-            ; status register which should be present once the DA flag is
-            ; cleared by reading the data register.
-
-uartchk:    inp   UART_DATA             ; clear all possible status bits
-            inp   UART_STATUS
-
-            inp   UART_STATUS           ; check status register bits we can
-            ani   0e1h                  ;  reliably know
-            xri   0c0h
-            bnz   savefrq
-
-            ldn   ra                    ; looks like uart is present
-            ori   (1<<3)
-            str   ra
-
-
             ; Store the processor clock frequency to it's memory variable.
 
 savefrq:    inc   ra                    ; move on from device map
@@ -325,13 +392,14 @@ cpyloop:    lda   rc                    ; copy each byte to ram
             ; Enable expander card memory (this code runs from low RAM).
             ; If the expander card is not present, this does nothing.
 
-raminit:    sex   r3                    ; inline args to out opcode
-
-            out   EXP_PORT              ; make sure default expander group
-            db    0
-
-            out   RTC_PORT              ; enable banked ram now
+raminit:    sex   r3                    ; enable banked ram
+            out   RTC_PORT
             db    81h
+
+          #if RTC_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    NO_GROUP
+          #endif
 
 
             ; Find the last address of RAM present in the system. The search
@@ -363,12 +431,12 @@ scnloop:    glo   rf                    ; randomize address within page
 
             ghi   rf                    ; advance pointer to next page
             adi   1
-	    phi   rf
+            phi   rf
 
             ldi   0                     ; get contents of memory, save it,
-	    xor                         ;  then complement it
+            xor                         ;  then complement it
             plo   re
-	    xri   255
+            xri   255
 
             str   rf                    ; write complement back, then read,
             xor                         ;  if not the same then set df
@@ -376,7 +444,7 @@ scnloop:    glo   rf                    ; randomize address within page
 
             glo   re                    ; restore original value
             str   rf
-	    
+  
 scnwait:    glo   re                    ; wait until value just written
             xor                         ;  reads back again
             bnz   scnwait
@@ -395,7 +463,7 @@ scnwait:    glo   re                    ; wait until value just written
             ; Now that all initialization has been done, boot the system by
             ; simply jumping to ideboot.
 
-#ifdef IDE_SETTLE
+          #ifdef IDE_SETTLE
             ldi   255
             plo   rf
             ldi   ((FREQ_KHZ/32)*(IDE_SETTLE/20))/51
@@ -404,10 +472,16 @@ bootdly:    phi   rf
             dec   rf
             ghi   rf
             bnz   bootdly
-#endif
+          #endif
+
             lbr   ideboot
 
 endinit:    equ   $
+
+
+          #if $ > 0f800h
+            #error Page F700 overflow
+          #endif
 
 
             ; The vector table at 0F800h was introduced with the Elf2K and
@@ -638,6 +712,10 @@ i2azero:    dec   rc                    ; move to next divisor in table,
 divisor:    equ   $-1
 
 
+          #if $ > 0f900h
+            #error Page F800 overflow
+          #endif
+
 
             org   0f900h
 
@@ -650,16 +728,24 @@ inmsg:      lda   r6
             sep   sret
 
 
-; Initialize CDP1854 UART port and set RE to indicate UART in use. This was
-; written for the 1802/Mini but is generic to the 1854 since it doesn't
-; access the extra control register that the 1802/Mini has. This means it
-; runs at whatever baud rate the hardware has setup since there isn't any
-; software control on a generic 1854 implementation.
+            ; Initialize CDP1854 UART port and set RE to indicate UART in use.
+            ; This was written for the 1802/Mini but is generic to the 1854
+            ; since it doesn't access the extra control register that the
+            ; 1802/Mini has. This means it runs at whatever baud rate the
+            ; hardware has setup since there isn't any software control on
+timalc54:   ; a generic 1854 implementation.
 
-timalc54:
-#ifdef 1854_DETECT
+          #ifdef UART_DETECT
             BRMK  usebbang
-#endif
+          #endif
+ 
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT              ; make sure default expander group
+            db    UART_GROUP
+            sex   r2
+          #endif
+
             inp   UART_DATA
             inp   UART_STATUS
 
@@ -667,10 +753,14 @@ timalc54:
             ani   2fh
             bnz   usebbang
 
-            ldi   19h                 ; 8 data bits, 1 stop bit, no parity
-            str   r2
+            sex   r3
             out   UART_STATUS
-            dec   r2
+            db    19h                 ; 8 data bits, 1 stop bit, no parity
+
+          #if UART_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    NO_GROUP
+          #endif
 
             ldi   1
             phi   re
@@ -683,6 +773,12 @@ usebbang:   lbr   timalc
             ; at RF in the order that Elf/OS expects: M, D, Y, H, M, S.
 
 gettod:     sex   r3                    ; output register d address to rtc
+
+          #if RTC_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    RTC_GROUP
+          #endif
+
             out   RTC_PORT
             db    2dh
 
@@ -747,6 +843,11 @@ getnext:    sex   rd                    ; output tens address, inc pointer
 todretn:    inc   r2                    ; restore table pointer register
             adi   0                     ; return success to caller
 
+          #if RTC_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    RTC_GROUP
+          #endif
+
 freeret:    lda   r2
             phi   rd
             ldn   r2
@@ -765,6 +866,12 @@ settod:     glo   rd                    ; save so we can use as table pointer
             stxd
             ghi   rd
             stxd
+
+          #if RTC_GROUP
+            sex   r3
+            out   EXP_PORT              ; make sure default expander group
+            db    RTC_GROUP
+          #endif
 
             ghi   r3                    ; get pointer to table of data
             phi   rd
@@ -900,6 +1007,10 @@ retvar:     lda   re                    ; return variable value in rf
 
             sep   sret                  ; return to caller
 
+
+          #if $ > 0fa00h
+            #error Page F900 overflow
+          #endif
 
 
             org   0fa00h
@@ -1094,10 +1205,10 @@ numret:     glo   re                    ; restore and return
 
  
 
-#ifdef SET_BAUD
+          #ifdef SET_BAUD
 timalc:     ldi   (FREQ_KHZ*5)/(SET_BAUD/25)-23
+          #else
 
-#else
 timalc:     SEMK                      ; Make output in correct state
 
 timersrt:   ldi   0                   ; Wait to make sure the line is idle,
@@ -1123,7 +1234,8 @@ timedone:   ldi   63                  ; Pre-load this value that we will
             ghi   re                  ; Get timing loop value, subtract
             smi   23                  ;  offset of 23 counts, if less than
             bnf   timersrt            ;  this, then too low, go try again
-#endif
+          #endif
+
             bz    timegood            ; Fold both 23 and 24 into zero, this
             smi   1                   ;  adj is needed for 9600 at 1.8 Mhz
 
@@ -1147,6 +1259,9 @@ timekeep:   ghi   re                  ; Get final result and shift left one
             sep   sret                ;  return to caller
 
 
+          #if $ > 0fb00h
+            #error Page FA00 overflow
+          #endif
 
 
             org   0fb00h
@@ -1194,57 +1309,75 @@ timekeep:   ghi   re                  ; Get final result and shift left one
 
 
 
-iderst:     sep   scall                 ; wait til drive ready
+iderst:     sex   r3                    ; use inline arguments
+
+          #if IDE_GROUP
+            out   EXP_PORT              ; select ide port group
+            db    IDE_GROUP
+          #endif
+
+            sep   scall                 ; wait until drive ready
             dw    waitrdy
-            bdf   ideret                ; jump if timout
+            bdf   ideret
 
-            sex   r3
+            sex   r3                    ; use inline arguments
 
-            out   IDE_SELECT            ; write select port
-            db    IDE_R_HEAD            ; select device register
-            out   IDE_DATA              ; write device code
+            out   IDE_SELECT            ; select lba mode and drive 0
+            db    IDE_R_HEAD
+            out   IDE_DATA
             db    IDE_H_LBA
 
-            out   IDE_SELECT            ; select feature register
+            out   IDE_SELECT            ; enable feature 8 bit mode
             db    IDE_R_FEAT
-            out   IDE_DATA              ; enable 8 bit mode
+            out   IDE_DATA
             db    IDE_F_8BIT 
 
-            out   IDE_SELECT            ; select command register
+            out   IDE_SELECT            ; send set feature command
             db    IDE_R_CMND
-            out   IDE_DATA              ; command to set features
+            out   IDE_DATA
             db    IDE_C_FEAT 
 
-            ; Fall through to waitrdy to wait completion of command
+waitret:    sep   scall
+            dw    waitrdy
+ideret:
+          #if IDE_GROUP
+            sex   r3
+            out   EXP_PORT              ; leave as default group
+            db    NO_GROUP
+          #endif
 
-waitrdy:    sex   r3                    ; store onto stack
-            out   IDE_SELECT            ; write ide selection port
+            sep   sret
+
+
+waitrdy:    sex   r3
+
+            out   IDE_SELECT            ; select status register
             db    IDE_R_STAT
-            sex   r2                    ; point x back to free spot
 
-rdy_go:     inp   IDE_DATA              ; read status register
-            xri   IDE_S_RDY             ; check if RDY is set
-            ani   IDE_S_RDY+IDE_S_BUSY  ; and BSY is clear
-            bnz   rdy_go                ; wait until they are
+            sex   r2                    ; inp result to stack
 
-            ldn   r2
-            ani   IDE_S_ERR             ; check if ERR is set
-            bnz   ideerror              ; jump if ERR is set
+looprdy:    inp   IDE_DATA              ; wait for rdy set and bsy clear
+            xri   IDE_S_RDY
+            ani   IDE_S_RDY+IDE_S_BUSY
+            bnz   looprdy
 
-            ldn   r2                    ; get status byte
+            ldn   r2                    ; error if err is set
+            ani   IDE_S_ERR
+            bnz   rdyerr
 
-            adi   0                     ; signal good
-            sep   sret                  ; return to caller
+            ldn   r2                    ; get status back, return success
+            adi   0
+            sep   sret
 
-ideerror:   sex   r3                    ; setup for immediate out
-            out   IDE_SELECT            ; select error register
+rdyerr:     sex   r3                    ; select error register
+            out   IDE_SELECT
             db    IDE_R_ERROR
-            sex   r2                    ; set X back to stack
 
-            inp   IDE_DATA              ; read error register into D
+            sex   r2                    ; inp result onto stack
 
-            smi   0                     ; signal error occurred
-ideret:     sep   sret                  ; return to caller
+            inp   IDE_DATA              ; get error status, return failure
+            smi   0
+            sep   sret
 
 
             ; Disk read and write share mostly common code, there is just a
@@ -1270,7 +1403,14 @@ ideread:    ldi   dmard.0               ; address of read routine
 
             ; Now the working part of the disk routine for the transfer.
  
-execide:    sep   scall                 ; be sure drive is ready
+execide:    sex   r3                    ; inline out arguments
+
+          #if IDE_GROUP
+            out   EXP_PORT              ; set ide expander group
+            db    IDE_GROUP
+          #endif
+
+            sep   scall                 ; be sure drive is ready
             dw    waitrdy
             bdf   idepop
 
@@ -1283,8 +1423,9 @@ execide:    sep   scall                 ; be sure drive is ready
             glo   r7                    ; push lba low byte
             str   r2
 
-            sex   r3                    ; set sector count to one
-            out   IDE_SELECT
+            sex   r3                    ; inline out arguments
+
+            out   IDE_SELECT            ; set sector count to one
             db    IDE_R_COUNT
             out   IDE_DATA
             db    1
@@ -1318,9 +1459,9 @@ execide:    sep   scall                 ; be sure drive is ready
             sex   r2
             out   IDE_DATA
 
-            dec   r2                    ; wait until drive not busy
+            dec   r2                    ; make room for inp value
 
-idebusy:    inp   IDE_DATA
+idebusy:    inp   IDE_DATA              ; wait until drive not busy
             ani   IDE_S_BUSY
             bnz   idebusy
 
@@ -1337,6 +1478,12 @@ idebusy:    inp   IDE_DATA
 
 idepop:     lda   r2                    ; get saved status register value
             inc   r2
+
+          #if IDE_GROUP
+            sex   r3
+            out   EXP_PORT              ; set ide expander group
+            db    IDE_GROUP
+          #endif
 
 error:      smi   0
             sep   sret                  ; return to caller
@@ -1356,7 +1503,7 @@ dmawrt:     glo   rf                    ; set dma pointer to data buffer
             out   IDE_SELECT
             db    IDE_A_DMOUT
 
-            br    waitrdy
+            br    waitret
 
 
 dmard:      glo   rf                    ; set dma pointer to data buffer
@@ -1378,15 +1525,19 @@ dmard:      glo   rf                    ; set dma pointer to data buffer
             out   IDE_SELECT            ; start dma input operation
             db    IDE_A_DMAIN
 
-            sex   r2                    ; no dma overrun, complete transfer
-            glo   r0
+            glo   r0                    ; if no dma overrun, complete
+            sex   r2
             sm
-            bz    waitrdy
+            bz    waitret
 
-            glo   re                    ; fix overwritten byte, then complete
+            glo   re                    ; fix overrun byte, then complete
             str   rf
-            br    waitrdy
+            br    waitret
 
+
+          #if $ > 0fc00h
+            #error Page FB00 overflow
+          #endif
 
 
             org   0fc00h
@@ -1415,6 +1566,13 @@ type:       ghi   re
 uread:      ghi   re
             shr
 
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT
+            db    UART_GROUP
+            sex   r2
+          #endif
+
 ureadlp:    inp   UART_STATUS
             ani   1
             bz    ureadlp
@@ -1425,25 +1583,58 @@ ureadlp:    inp   UART_STATUS
             plo   re
 
 
-; UTYPE54 outputs character in D through 1854 UART.
+            ; UTYPE54 outputs character in D through 1854 UART.
 
+          #if UART_GROUP
+            br    uecho
+
+utype:      sex   r3
+            out   EXP_PORT
+            db    UART_GROUP
+            sex   r2
+
+uecho:      inp   UART_STATUS
+          #else
 utype:      inp   UART_STATUS
+          #endif
+
             shl
             bnf   utype
 
             glo   re
             str   r2
             out   UART_DATA
-
             dec   r2
-utypert:    sep   sret
+
+utypert:
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT
+            db    NO_GROUP
+          #endif
+
+            sep   sret
 
 
-; UTEST54 returns DF=1 if an input character is available from the 1854 UART,
-; and DF=0 otherwise.
+            ; UTEST54 returns DF=1 if an input character is available from
+utest:      ; the 1854 UART, and DF=0 otherwise.
 
-utest:      inp   UART_STATUS
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT
+            db    UART_GROUP
+            sex   r2
+          #endif
+
+            inp   UART_STATUS
             shr
+
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT
+            db    NO_GROUP
+          #endif
+
             sep   sret
 
 ; End of 1854 UART send and receive code.
@@ -1619,13 +1810,13 @@ btyretn:    inc   r2
 
 
 
-btest:     adi     0                   ; if no break, return df clear
-           BRMK    nobreak
+btest:      adi   0                   ; if no break, return df clear
+            BRMK  nobreak
 
-           smi     0                   ; return df set, wait for end
-break:     BRSP    break
+            smi   0                   ; return df set, wait for end
+break:      BRSP  break
 
-nobreak:   sep     sret                ; return result
+nobreak:    sep   sret                ; return result
 
 
 ; Set baud rate and character format for the 1854 UART. This does a bunch
@@ -1638,6 +1829,13 @@ usetbd:     ani   7                     ; mask baud rate bits,
 
             shl                         ; shift left,
             ori   32                    ;  set no jumper bit
+
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT
+            db    UART_GROUP
+            sex   r2
+          #endif
 
             str   r2                    ; output to aux control register
             out   UART_STATUS
@@ -1660,8 +1858,19 @@ usetbd:     ani   7                     ; mask baud rate bits,
             out   UART_STATUS
             dec   r2
 
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT
+            db    NO_GROUP
+          #endif
+
             shl
             sep   sret
+
+
+          #if $ > 0fd00h
+            #error Page FC00 overflow
+          #endif
 
 
              org     0fd00h
@@ -1957,20 +2166,26 @@ back:       dec   rf
             br    inloop
            
 
+          #if $ > 0fe00h
+            #error Page FD00 overflow
+          #endif
 
             org   0fe00h
 
 
-boot:       ldi   stack.1               ; setup stack for mark
+boot:       ldi   stack.1               ; setup stack for mark opcode
             phi   r2
             ldi   stack.0
             plo   r2
 
-            mark                        ; copy p to x
+            mark                        ; copy p to x for inline args
 
-            out   EXP_PORT              ; switch entire rom in
-            db    0
-            out   RTC_PORT
+          #if IDE_GROUP
+            out   EXP_PORT
+            db    IDE_GROUP
+          #endif
+
+            out   RTC_PORT              ; disable banked ram so all rom
             db    80h
 
             lbr   sysinit               ; jump to initialization
@@ -1979,10 +2194,11 @@ boot:       ldi   stack.1               ; setup stack for mark
 ideboot:    sep   scall                 ; initialize ide drive
             dw    f_iderst
 
-#ifdef INIT_CON
+          #ifdef INIT_CON
             sep   scall
             dw    f_setbd
-#endif
+          #endif
+
             ldi   bootpg.1              ; load boot sector to $0100
             phi   rf
             ldi   bootpg.0
@@ -2022,6 +2238,10 @@ msg:        lda   rf                  ; load byte from message
 ;   4: Real-time clock
 ;   5: Non-volatile RAM
 
+
+          #if $ > 0ff00h
+            #error Page FE00 overflow
+          #endif
 
 
             org   0ff00h
@@ -2145,3 +2365,4 @@ ret:        plo   re                    ; save d and set x to 2
 
 version:    db    2,0,0
 chsum:      db    0,0,0,0
+
