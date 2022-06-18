@@ -845,7 +845,7 @@ todretn:    inc   r2                    ; restore table pointer register
 
           #if RTC_GROUP
             out   EXP_PORT              ; make sure default expander group
-            db    RTC_GROUP
+            db    NO_GROUP
           #endif
 
 freeret:    lda   r2
