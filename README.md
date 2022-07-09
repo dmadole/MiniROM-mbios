@@ -12,3 +12,5 @@ This is a BIOS for inclusion in ROM in an 1802 system to support the Elf/OS oper
 This BIOS is a completely original software not derived from Mike Riley's original except that the routines included are written to the same API and are meant to be feature-for-feature (and in some cases bug-for-bug) compatible.
 
 While developed to support the 1802/Mini-type systems this could also have inclusion of Pico/Elf or other peripherals if desired. Other than the optional banked RAM scheme and peripheral choices, there is nothing fundamentally unique to the 1802/Mini.
+
+Note that two BIOS routines, f_findtkn, and f_idnum, which are of limited utility and used only by RC/basic (to my knowledge) have been removed to save space. However, I have provided a RAM-loadable version of those routines for those who need them in the [Elfos-tokens](https://github.com/dmadole/Elfos-tokens) module.
