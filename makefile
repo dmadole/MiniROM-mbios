@@ -1,4 +1,7 @@
 
+none:
+	@echo Specify target as one of mini, superelf, rc1802
+
 mini: mbios.asm
 	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
 	asm02 -L -b -D1802MINI mbios.tmp
@@ -14,9 +17,9 @@ rc1802: mbios.asm
 	asm02 -L -b -DRC1802 mbios.tmp
 	@rm mbios.build mbios.tmp
 
-maximize: mbios.asm
+test: mbios.asm
 	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
-	asm02 -L -b -DMAXIMIZE mbios.tmp
+	asm02 -L -b -DTEST mbios.tmp
 	@rm mbios.build mbios.tmp
 
 clean:

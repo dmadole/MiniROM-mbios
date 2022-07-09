@@ -28,6 +28,7 @@
   #define SEMK         seq              ; set serial mark
   #define SESP         req              ; set serial space
   #define EXP_PORT     1                ; group i/o expander port
+  #define EXP_MEMORY                    ; enable expansion memory
   #define IDE_GROUP    0                ; ide interface group
   #define IDE_SELECT   2                ; ide interface address port
   #define IDE_DATA     3                ; ide interface data port
@@ -46,14 +47,15 @@
   #define SEMK         seq              ; set serial mark
   #define SESP         req              ; set serial space
   #define EXP_PORT     5                ; group i/o expander port
+  #define EXP_MEMORY                    ; enable expansion memory
   #define IDE_GROUP    0                ; ide interface group
   #define IDE_SELECT   2                ; ide interface address port
   #define IDE_DATA     3                ; ide interface data port
-  #define RTC_GROUP    1                ; real time clock group
-  #define RTC_PORT     3                ; real time clock port
   #define UART_GROUP   0                ; uart port group
   #define UART_DATA    6                ; uart data port
   #define UART_STATUS  7                ; uart status/command port
+  #define RTC_GROUP    1                ; real time clock group
+  #define RTC_PORT     3                ; real time clock port
   #define SET_BAUD     9600             ; bit-bang serial fixed baud rate
   #define FREQ_KHZ     1790             ; default processor clock frequency
 #endif
@@ -64,19 +66,19 @@
   #define SEMK         seq              ; set serial mark
   #define SESP         req              ; set serial space
   #define EXP_PORT     1                ; group i/o expander port
-  #define IDE_GROUP    1                ; ide interface group
+  #define IDE_GROUP    0                ; ide interface group
   #define IDE_SELECT   2                ; ide interface address port
   #define IDE_DATA     3                ; ide interface data port
-  #define RTC_GROUP    2                ; real time clock group
-  #define RTC_PORT     3                ; real time clock port
-  #define UART_GROUP   0                ; uart port group
+  #define UART_GROUP   1                ; uart port group
   #define UART_DATA    2                ; uart data port
   #define UART_STATUS  3                ; uart status/command port
-  #define SET_BAUD     19200            ; bit-bang serial fixed baud rate
-  #define FREQ_KHZ     4000             ; default processor clock frequency
+  #define RTC_GROUP    2                ; real time clock group
+  #define RTC_PORT     3                ; real time clock port
+  #define SET_BAUD     9600             ; bit-bang serial fixed baud rate
+  #define FREQ_KHZ     2000             ; default processor clock frequency
 #endif
 
-#ifdef MAXIMIZE
+#ifdef TEST
   #define BRMK         bn2              ; branch on serial mark
   #define BRSP         b2               ; branch on serial space
   #define SEMK         seq              ; set serial mark
@@ -85,11 +87,11 @@
   #define IDE_GROUP    1                ; ide interface group
   #define IDE_SELECT   2                ; ide interface address port
   #define IDE_DATA     3                ; ide interface data port
-  #define RTC_GROUP    2                ; real time clock group
-  #define RTC_PORT     3                ; real time clock port
   #define UART_GROUP   4                ; uart port group
   #define UART_DATA    6                ; uart data port
   #define UART_STATUS  7                ; uart status/command port
+  #define RTC_GROUP    2                ; real time clock group
+  #define RTC_PORT     3                ; real time clock port
   #define FREQ_KHZ     4000             ; default processor clock frequency
 #endif
 
@@ -109,6 +111,7 @@ devbits:    equ   0036h                 ; f_getdev device present result
 clkfreq:    equ   0038h                 ; processor clock frequency in khz
 lastram:    equ   003ah                 ; f_freemem last ram address result
 
+scratch:    equ   0080h                 ; pre-boot scratch buffer memory
 stack:      equ   00ffh                 ; top of temporary booting stack
 bootpg:     equ   0100h                 ; address to load boot block to
 
@@ -119,14 +122,27 @@ o_wrmboot:  equ   0303h                 ; kernel warm-boot reinitialization
 k_clkfreq:  equ   0470h                 ; processor clock frequency in khz
 
 
-            org   0f700h
+            ; The BIOS is divided into two parts, an always-resident part
+            ; from F800-FFFF that is always mapped into memory and an
+            ; initialization-only part that is below F800, and is currently
+            ; F600-F7FF. This part is used for things that only need to 
+            ; happen at a hard reset and never again, so that ROM space can
+            ; be paged out and replaced with RAM when booting.
+
+
+            org   0f600h
 
 
             ; Do some basic initialization. Branching to initcall will setup
             ; R4 and R5 for SCALL, R2 as stack pointer, and finally, R3 as PC
             ; when it returns via SRET.
 
-sysinit:    ldi   chkdevs.1             ; return address for initcall
+sysinit:    ldi   stack.1               ; temporary boot stack
+            phi   r2
+            ldi   stack.0
+            plo   r2
+
+            ldi   chkdevs.1             ; return address for initcall
             phi   r6
             ldi   chkdevs.0
             plo   r6
@@ -180,11 +196,11 @@ chkdevs:    ldi   devbits.1             ; pointer to memory variables
             sex   r2
           #endif
 
-            inp   UART_DATA             ; clear all possible status bits
-            inp   UART_STATUS
+            inp   UART_STATUS           ; clear status flags
+            inp   UART_DATA
 
-            inp   UART_STATUS           ; check status register bits we can
-            ani   0e1h                  ;  reliably know
+            inp   UART_STATUS           ; check for psi and da bits low
+            ani   0e1h
             xri   0c0h
             bnz   findrtc
 
@@ -323,6 +339,7 @@ savefrq:    inc   ra                    ; move on from device map
             str   ra
             inc   ra
             glo   rb
+            ani   -2
             str   ra
             inc   ra
 
@@ -375,7 +392,9 @@ tknloop:    ldi   0c0h                  ; write lbr opcode and address
             plo   rc
             plo   rd
 
-            ldi   endinit-raminit       ; number of bytes to copy
+            ldi   (endinit-raminit).1   ; number of bytes to copy
+            phi   re
+            ldi   (endinit-raminit).0
             plo   re
 
 cpyloop:    lda   rc                    ; copy each byte to ram
@@ -383,6 +402,8 @@ cpyloop:    lda   rc                    ; copy each byte to ram
             inc   rd
             dec   re
             glo   re
+            bnz   cpyloop
+            ghi   re
             bnz   cpyloop
 
             ldi   bootpg.1              ; jump to copy in ram
@@ -393,8 +414,11 @@ cpyloop:    lda   rc                    ; copy each byte to ram
             ; If the expander card is not present, this does nothing.
 
 raminit:    sex   r3                    ; enable banked ram
+
+          #ifdef EXP_MEMORY
             out   RTC_PORT
             db    81h
+          #endif
 
           #if RTC_GROUP
             out   EXP_PORT              ; make sure default expander group
@@ -459,6 +483,132 @@ scnwait:    glo   re                    ; wait until value just written
             ldi   0ffh
             str   ra
 
+            lbr   bootpg+0100h
+
+          #if $ > 0f800h
+            #error Page F700 overflow
+          #endif
+
+            org   0f700h
+
+            ;
+            ;
+
+bootmsg:    ldi   devbits.1             ; pointer to memory variables
+            phi   ra
+            ldi   devbits.0
+            plo   ra
+
+          #ifdef INIT_CON
+            sep   scall
+            dw    setbd
+          #endif
+
+            sep   scall
+            dw    inmsg
+            db    13,10
+            db    13,10
+            db    'MBIOS 2.1.0',13,10
+            db    'Devices: ',0
+
+            inc   ra
+            lda   ra
+            plo   rb
+
+            ghi   r3
+            phi   rd
+            ldi   devname.0
+            plo   rd
+
+devloop:    glo   rb
+            shr
+            plo   rb
+            bnf   skipdev
+
+            ghi   rd
+            phi   rf
+            glo   rd
+            plo   rf
+
+            sep   scall
+            dw    msg
+
+            ldi   ' '
+            sep   scall
+            dw    type
+
+skipdev:    lda   rd
+            bnz   skipdev
+
+            ldn   rd
+            bnz   devloop
+
+            sep   scall
+            dw    inmsg
+            db    13,10
+            db    'Clock: ',0
+
+            ldi   scratch.1
+            phi   rf
+            ldi   scratch.0
+            plo   rf
+
+            lda   ra
+            phi   rd
+            lda   ra
+            plo   rd
+
+            sep   scall
+            dw    uintout
+
+            ldi   0
+            str   rf
+
+            ldi   scratch.1
+            phi   rf
+            ldi   scratch.0
+            plo   rf
+
+            sep   scall
+            dw    msg
+
+            sep   scall
+            dw    inmsg
+            db    ' KHz'13,10
+            db    'Memory: ',0
+
+            ldi   0
+            phi   rd
+            lda   ra
+            shr
+            shr
+            adi   1
+            plo   rd
+
+            ldi   scratch.1
+            phi   rf
+            ldi   scratch.0
+            plo   rf
+
+            sep   scall
+            dw    uintout
+
+            ldi   0
+            str   rf
+
+            ldi   scratch.1
+            phi   rf
+            ldi   scratch.0
+            plo   rf
+
+            sep   scall
+            dw    msg
+
+            sep   scall
+            dw    inmsg
+            db    ' KB',13,10
+            db    13,10,0
+
 
             ; Now that all initialization has been done, boot the system by
             ; simply jumping to ideboot.
@@ -475,6 +625,20 @@ bootdly:    phi   rf
           #endif
 
             lbr   ideboot
+
+            ;   0: IDE-like disk device
+            ;   1: Floppy (no longer relevant)
+            ;   2: Bit-banged serial
+            ;   3: UART-based serial
+            ;   4: Real-time clock
+            ;   5: Non-volatile RAM
+
+devname:    db  'IDE',0                 ; bit 0
+            db  'Floppy',0              ; bit 1
+            db  'Serial',0              ; bit 2
+            db  'UART',0                ; bit 3
+            db  'RTC',0                 ; bit 4
+            db   0
 
 endinit:    equ   $
 
@@ -598,9 +762,6 @@ a2iloop:    stxd                        ; save new digit value to stack
             glo   rd                    ; add new digit into result in rd
             add
             plo   rd
-            ghi   rd
-            adci  0
-            phi   rd
 
             lda   rf                    ; get next character
 
@@ -614,406 +775,8 @@ a2iend:     dec   rf                    ; back up to non-digit and return
             sep   sret
 
 
-            ; Converts a 16-bit number to an ASCII decimal string. This will
-            ; output negative or positive numbers when called at intout, or
-            ; positive numbers only at uintout. Leading zeroes are suppressed.
-            ;
-            ;   IN:   RD - number to convert
-            ;         RF - pointer to buffer to place number at
-            ;   OUT:  RD - destroyed
-            ;         RF - points just past converted number
 
-intout:     ghi   rd                    ; test if number is negative
-            shl
-            bnf   uintout
 
-            glo   rd                    ; if so, subtract from zero to 
-            sdi   0                     ;  convert to positive
-            plo   rd
-            ghi   rd
-            sdbi  0
-            phi   rd
-
-            ldi   '-'                   ; output minus sign to buffer
-            str   rf
-            inc   rf
-
-uintout:    glo   rc                    ; need for pointer to constants
-            stxd
-            ghi   rc
-            stxd
-
-            ldi   divisor.1             ; get pointer to constants table
-            phi   rc
-            ldi   divisor.0
-            plo   rc
-
-            sex   rc                    ; arithmatic operations against table
-
-            ldi   0                     ; clear dividend
-            plo   re
-
-            br    i2adig                ; start division
-
-            ; This divides by the constant in the table by repeated
-            ; subtraction. For small dividends like this, it's faster than
-            ; more complex algorithms.
-
-i2adiv:     phi   rd                    ; update with result of subtraction
-            ldn   r2
-            plo   rd
-
-            inc   rc                    ; back to lsb, increment dividend
-            inc   re
-
-i2adig:     glo   rd                    ; subtract constant from number but
-            sm                          ;  dont update result yet
-            str   r2
-            dec   rc
-            ghi   rd
-            smb
-
-            bdf   i2adiv                ; loop if result is positive
-
-            glo   re                    ; if result is zero, skip output
-            bz    i2azero
-
-            ani   15                    ; mask off leading zero flag
-
-            adi   '0'                   ; convert to digit and put in buffer
-            str   rf
-            inc   rf
-
-            ldi   16                    ; set zero flag bit in counter
-            plo   re
-
-i2azero:    dec   rc                    ; move to next divisor in table,
-            ldn   rc                    ;  keep looping until last one
-            bnz   i2adig
-
-            glo   rd                    ; what's left is the last digit,
-            adi   '0'                   ;  add it to the buffer
-            str   rf
-            inc   rf
-
-            inc   r2                    ; pop saved rc, use r2 explicitly
-            lda   r2                    ;  because x is not 2
-            phi   rc
-            ldn   r2
-            plo   rc
-
-            sep   sret                  ; return (and reset x to 2)
-
-            ; Table of divisors used by intout. We don't need 1 because that
-            ; is just the remainder, of course. Table is used from top down.
-
-            db    0
-            dw    10, 100, 1000, 10000
-divisor:    equ   $-1
-
-
-          #if $ > 0f900h
-            #error Page F800 overflow
-          #endif
-
-
-            org   0f900h
-
-inmsglp:    sep   scall
-            dw    f_type
-
-inmsg:      lda   r6
-            bnz   inmsglp
-
-            sep   sret
-
-
-            ; Initialize CDP1854 UART port and set RE to indicate UART in use.
-            ; This was written for the 1802/Mini but is generic to the 1854
-            ; since it doesn't access the extra control register that the
-            ; 1802/Mini has. This means it runs at whatever baud rate the
-            ; hardware has setup since there isn't any software control on
-timalc54:   ; a generic 1854 implementation.
-
-          #ifdef UART_DETECT
-            BRMK  usebbang
-          #endif
- 
-          #if UART_GROUP
-            sex   r3
-            out   EXP_PORT              ; make sure default expander group
-            db    UART_GROUP
-            sex   r2
-          #endif
-
-            inp   UART_DATA
-            inp   UART_STATUS
-
-            inp   UART_STATUS
-            ani   2fh
-            bnz   usebbang
-
-            sex   r3
-            out   UART_STATUS
-            db    19h                 ; 8 data bits, 1 stop bit, no parity
-
-          #if UART_GROUP
-            out   EXP_PORT              ; make sure default expander group
-            db    NO_GROUP
-          #endif
-
-            ldi   1
-            phi   re
-            sep   sret
-
-usebbang:   lbr   timalc
-
-
-            ; Get the time of day from the hardware clock into the buffer
-            ; at RF in the order that Elf/OS expects: M, D, Y, H, M, S.
-
-gettod:     sex   r3                    ; output register d address to rtc
-
-          #if RTC_GROUP
-            out   EXP_PORT              ; make sure default expander group
-            db    RTC_GROUP
-          #endif
-
-            out   RTC_PORT
-            db    2dh
-
-            br    todhold               ; go to busy bit check algorithm
-
-todbusy:    sex   r3                    ; clear hold bit
-            out   RTC_PORT
-            db    10h
-
-todhold:    out   RTC_PORT              ; set hold bit
-            db    11h
-
-            sex   r2                    ; wait until busy bit is clear
-            inp   RTC_PORT
-            ani   02h
-            bnz   todbusy
-
-            glo   rd                    ; save so we can use as table pointer
-            stxd
-            ghi   rd
-            stxd
-
-            ghi   r3                    ; get pointer to register table
-            phi   rd
-            ldi   clocktab.0
-            plo   rd
-
-getnext:    sex   rd                    ; output tens address, inc pointer
-            out   RTC_PORT
-
-            sex   r2                    ; input tens and multiply by 10
-            inp   RTC_PORT
-            ani   0fh
-            str   r2
-            shl
-            shl
-            add
-            shl
-            stxd                        ; decrement for room for next inp
-
-            sex   rd                    ; output ones address, inc pointer
-            out   RTC_PORT
-
-            sex   r2                    ; input ones and add to tens
-            inp   RTC_PORT
-            ani   0fh
-            inc   r2
-            add
-
-            str   rf                    ; save to output buffer and bump
-            inc   rf
-
-            ldn   rd                    ; continue if more digits to fetch
-            bnz   getnext
-
-            sex   r3                    ; clear hold bit
-            out   RTC_PORT
-            db    2dh
-            out   RTC_PORT
-            db    10h
-
-todretn:    inc   r2                    ; restore table pointer register
-            adi   0                     ; return success to caller
-
-          #if RTC_GROUP
-            out   EXP_PORT              ; make sure default expander group
-            db    NO_GROUP
-          #endif
-
-freeret:    lda   r2
-            phi   rd
-            ldn   r2
-            plo   rd
-
-            sep   sret
-
-
-            ; Set the time on the 72421 RTC chip. This reinitializes the
-            ; chip when it sets the time so that it can properly setup a
-            ; new system or after the clock battery has been replaced. This
-            ; also resets the internal fraction of second to zero so the
-            ; time set is precise and will roll over one second later.
-
-settod:     glo   rd                    ; save so we can use as table pointer
-            stxd
-            ghi   rd
-            stxd
-
-          #if RTC_GROUP
-            sex   r3
-            out   EXP_PORT              ; make sure default expander group
-            db    RTC_GROUP
-          #endif
-
-            ghi   r3                    ; get pointer to table of data
-            phi   rd
-            ldi   clockini.0
-            plo   rd
-
-            sex   rd                    ; port output from table
-
-setinit:    out   RTC_PORT              ; output values until zero reached
-            ldn   rd
-            bnz   setinit
-
-            inc   rd                    ; skip zero marker and restore x
-            sex   r2
-
-            ; Now that the chip is initialized, set the time into the chip.
-
-setnext:    ldi   0                     ; clear tens counter
-            plo   re
-
-            lda   rf                    ; load value, advance pointer
-
-            skp                         ; divide by 10 by subtraction
-settens:    inc   re
-            smi   10
-            bdf   settens
-
-            adi   10+10h                ; adjust remainder and push to stack
-            stxd
-
-            glo   re                    ; push tens to stack
-            adi   10h
-            str   r2
-
-            sex   rd                    ; output tens address, inc pointer
-            out   RTC_PORT
-            sex   r2                    ; output tens value, pop stack
-            out   RTC_PORT
-
-            sex   rd                    ; output ones address, inc pointer
-            out   RTC_PORT
-            sex   r2                    ; output ones value, pop stack
-            out   RTC_PORT
-
-            dec   r2                    ; put stack pointer back
-
-            ldn   rd                    ; continue if more digits to fetch
-            bnz   setnext
-
-            sex   r3                    ; start the clock running
-            out   RTC_PORT
-            db    2fh
-            out   RTC_PORT
-            db    14h
-            
-            br    todretn               ; restore register and return
-
-
-clockini:   db    2fh,17h
-            db    2eh,10h
-            db    2dh,10h
-            db    2ch,10h
-            db    0
-
-            ; Table of the time-of-day digit addresses in the RTC 72421
-            ; chip in the order that Elf/OS presents the date.
-
-clocktab:   db    29h                   ; month
-            db    28h
-            db    27h                   ; day
-            db    26h
-            db    2bh                   ; year
-            db    2ah
-            db    25h                   ; hour
-            db    24h
-            db    23h                   ; minute
-            db    22h
-            db    21h                   ; second
-            db    20h
-            db    0
-
-
-            ; Return the address of the last byte of RAM. This returns the
-            ; RAM size that was discovered at boot rather than discovering
-            ; each time or having a built-in value. As a side effect, this
-            ; also updates the kernel variable containing the processor clock
-            ; frequency since there is no other way for that to happen
-            ; currently and this is a way to make it happen at start-up.
-
-freemem:    ghi   re                    ; we only need to half-save for temp
-            stxd
-
-            ldi   clkfreq.1             ; get address of bios variable
-            phi   re
-            ldi   clkfreq.0
-            plo   re
-
-            ldi   k_clkfreq.1           ; get address of kernel variable
-            phi   rf
-            ldi   k_clkfreq.0
-            plo   rf
-
-            lda   re                    ; update kernel with clock freq
-            str   rf
-            inc   rf
-            lda   re
-            str   rf
-
-            br    retvar                ; return freemem in rf
-
-
-            ; Return a bitmap of devices present in the system. This now
-            ; gives devices actually present, rather than just what has
-            ; support in the BIOS. This is discovered at boot time and then
-            ; that value is returned whenever requested.
-
-getdev:     ghi   re                    ; we only need to half-save for temp
-            stxd
-
-            ldi   devbits.1             ; get address of device bitmap
-            phi   re
-            ldi   devbits.0
-            plo   re
-
-retvar:     lda   re                    ; return variable value in rf
-            phi   rf
-            lda   re
-            plo   rf
-
-            inc   r2                    ; restore re.1 from temp use
-            ldn   r2
-            phi   re
-
-            sep   sret                  ; return to caller
-
-
-          #if $ > 0fa00h
-            #error Page F900 overflow
-          #endif
-
-
-            org   0fa00h
 
 
 hexin:      ldi   0                      ; clear holding register
@@ -1168,6 +931,289 @@ alpharet:   glo   re                    ; restore and return
             sep   sret
 
            
+          #if $ > 0f900h
+            #error Page F800 overflow
+          #endif
+
+
+            org   0f900h
+
+            ; Converts a 16-bit number to an ASCII decimal string. This will
+            ; output negative or positive numbers when called at intout, or
+            ; positive numbers only at uintout. Leading zeroes are suppressed.
+            ;
+            ;   IN:   RD - number to convert
+            ;         RF - pointer to buffer to place number at
+            ;   OUT:  RD - destroyed
+            ;         RF - points just past converted number
+
+intout:     ghi   rd                    ; test if number is negative
+            shl
+            bnf   uintout
+
+            glo   rd                    ; if so, subtract from zero to 
+            sdi   0                     ;  convert to positive
+            plo   rd
+            ghi   rd
+            sdbi  0
+            phi   rd
+
+            ldi   '-'                   ; output minus sign to buffer
+            str   rf
+            inc   rf
+
+uintout:    glo   rc                    ; need for pointer to constants
+            stxd
+            ghi   rc
+            stxd
+
+            ldi   divisor.1             ; get pointer to constants table
+            phi   rc
+            ldi   divisor.0
+            plo   rc
+
+            sex   rc                    ; arithmatic operations against table
+
+            ldi   0                     ; clear dividend
+            plo   re
+
+            br    i2adig                ; start division
+
+            ; This divides by the constant in the table by repeated
+            ; subtraction. For small dividends like this, it's faster than
+            ; more complex algorithms.
+
+i2adiv:     phi   rd                    ; update with result of subtraction
+            ldn   r2
+            plo   rd
+
+            inc   rc                    ; back to lsb, increment dividend
+            inc   re
+
+i2adig:     glo   rd                    ; subtract constant from number but
+            sm                          ;  dont update result yet
+            str   r2
+            dec   rc
+            ghi   rd
+            smb
+
+            bdf   i2adiv                ; loop if result is positive
+
+            glo   re                    ; if result is zero, skip output
+            bz    i2azero
+
+            ani   15                    ; mask off leading zero flag
+
+            adi   '0'                   ; convert to digit and put in buffer
+            str   rf
+            inc   rf
+
+            ldi   16                    ; set zero flag bit in counter
+            plo   re
+
+i2azero:    dec   rc                    ; move to next divisor in table,
+            ldn   rc                    ;  keep looping until last one
+            bnz   i2adig
+
+            glo   rd                    ; what's left is the last digit,
+            adi   '0'                   ;  add it to the buffer
+            str   rf
+            inc   rf
+
+            br    sretrc
+
+
+            ; Table of divisors used by intout. We don't need 1 because that
+            ; is just the remainder, of course. Table is used from top down.
+
+            db    0
+            dw    10, 100, 1000, 10000
+divisor:    equ   $-1
+
+
+            ; Get the time of day from the hardware clock into the buffer
+            ; at RF in the order that Elf/OS expects: M, D, Y, H, M, S.
+
+gettod:     sex   r3                    ; output register d address to rtc
+
+          #if RTC_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    RTC_GROUP
+          #endif
+
+            out   RTC_PORT
+            db    2dh
+
+            br    todhold               ; go to busy bit check algorithm
+
+todbusy:    sex   r3                    ; clear hold bit
+            out   RTC_PORT
+            db    10h
+
+todhold:    out   RTC_PORT              ; set hold bit
+            db    11h
+
+            sex   r2                    ; wait until busy bit is clear
+            inp   RTC_PORT
+            ani   02h
+            bnz   todbusy
+
+            glo   rc                    ; save so we can use as table pointer
+            stxd
+            ghi   rd
+            stxd
+
+            ghi   r3                    ; get pointer to register table
+            phi   rc
+            ldi   clocktab.0
+            plo   rc
+
+getnext:    sex   rc                    ; output tens address, inc pointer
+            out   RTC_PORT
+
+            sex   r2                    ; input tens and multiply by 10
+            inp   RTC_PORT
+            ani   0fh
+            str   r2
+            shl
+            shl
+            add
+            shl
+            stxd                        ; decrement for room for next inp
+
+            sex   rc                    ; output ones address, inc pointer
+            out   RTC_PORT
+
+            sex   r2                    ; input ones and add to tens
+            inp   RTC_PORT
+            ani   0fh
+            inc   r2
+            add
+
+            str   rf                    ; save to output buffer and bump
+            inc   rf
+
+            ldn   rc                    ; continue if more digits to fetch
+            bnz   getnext
+
+            sex   r3                    ; clear hold bit
+            out   RTC_PORT
+            db    2dh
+            out   RTC_PORT
+            db    10h
+
+todretn:    
+          #if RTC_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    NO_GROUP
+          #endif
+
+sretrc:     inc   r2                    ; restore table pointer register
+            lda   r2
+            phi   rc
+            ldn   r2
+            plo   rc
+
+            sep   sret
+
+
+            ; Set the time on the 72421 RTC chip. This reinitializes the
+            ; chip when it sets the time so that it can properly setup a
+            ; new system or after the clock battery has been replaced. This
+            ; also resets the internal fraction of second to zero so the
+            ; time set is precise and will roll over one second later.
+
+settod:     glo   rc                    ; save so we can use as table pointer
+            stxd
+            ghi   rc
+            stxd
+
+          #if RTC_GROUP
+            sex   r3
+            out   EXP_PORT              ; make sure default expander group
+            db    RTC_GROUP
+          #endif
+
+            ghi   r3                    ; get pointer to table of data
+            phi   rc
+            ldi   clockini.0
+            plo   rc
+
+            sex   rc                    ; port output from table
+
+setinit:    out   RTC_PORT              ; output values until zero reached
+            ldn   rc
+            bnz   setinit
+
+            inc   rc                    ; skip zero marker and restore x
+            sex   r2
+
+            ; Now that the chip is initialized, set the time into the chip.
+
+setnext:    ldi   0                     ; clear tens counter
+            plo   re
+
+            lda   rf                    ; load value, advance pointer
+
+settens:    inc   re                    ; divide by 10 by subtraction
+            smi   10
+            bdf   settens
+
+            adi   10h + 10              ; adjust remainder and push to stack
+            stxd
+
+            glo   re                    ; push tens to stack
+            adi   10h - 1
+            str   r2
+
+            sex   rc                    ; output tens address, inc pointer
+            out   RTC_PORT
+            sex   r2                    ; output tens value, pop stack
+            out   RTC_PORT
+
+            sex   rc                    ; output ones address, inc pointer
+            out   RTC_PORT
+            sex   r2                    ; output ones value, pop stack
+            out   RTC_PORT
+
+            dec   r2                    ; put stack pointer back
+
+            ldn   rc                    ; continue if more digits to fetch
+            bnz   setnext
+
+            sex   r3                    ; start the clock running
+            out   RTC_PORT
+            db    2fh
+            out   RTC_PORT
+            db    14h
+            
+            br    todretn               ; restore register and return
+
+
+clockini:   db    2fh,17h
+            db    2eh,10h
+            db    2dh,10h
+            db    2ch,10h
+            db    0
+
+            ; Table of the time-of-day digit addresses in the RTC 72421
+            ; chip in the order that Elf/OS presents the date.
+
+clocktab:   db    29h                   ; month
+            db    28h
+            db    27h                   ; day
+            db    26h
+            db    2bh                   ; year
+            db    2ah
+            db    25h                   ; hour
+            db    24h
+            db    23h                   ; minute
+            db    22h
+            db    21h                   ; second
+            db    20h
+            db    0
+
+
             ; Test if D contains a hex character, that is, 0-9, A-F, or a-f.
             ; If so, return DF set, otherwise DF is cleared. The passed
             ; character is returned unchanged either way.
@@ -1205,66 +1251,11 @@ numret:     glo   re                    ; restore and return
 
  
 
-          #ifdef SET_BAUD
-timalc:     ldi   (FREQ_KHZ*5)/(SET_BAUD/25)-23
-          #else
-
-timalc:     SEMK                      ; Make output in correct state
-
-timersrt:   ldi   0                   ; Wait to make sure the line is idle,
-timeidle:   smi   1                   ;  so we don't try to measure in the
-            nop                         ;  middle of a character, we need to
-            BRSP  timersrt            ;  get 256 consecutive loops without
-            bnz   timeidle            ;  input asserted before this exits
-
-timestrt:   BRMK  timestrt            ; Stall here until start bit begins
-
-            nop                         ; Burn a half a loop's time here so
-            ldi   1                   ;  that result rounds up if closer
-
-timecnt1:   phi   re                  ; Count up in units of 9 machine cycles
-timecnt2:   adi   1                   ;  per each loop, remembering the last
-            lbz   timedone            ;  time that input is asserted, the
-            BRSP  timecnt1            ;  very last of these will be just
-            br    timecnt2            ;  before the start of the stop bit
-
-timedone:   ldi   63                  ; Pre-load this value that we will 
-            plo   re                  ;  need in the calculations later
-
-            ghi   re                  ; Get timing loop value, subtract
-            smi   23                  ;  offset of 23 counts, if less than
-            bnf   timersrt            ;  this, then too low, go try again
+          #if $ > 0fa00h
+            #error Page F900 overflow
           #endif
 
-            bz    timegood            ; Fold both 23 and 24 into zero, this
-            smi   1                   ;  adj is needed for 9600 at 1.8 Mhz
-
-timegood:   phi   re                  ; Got a good measurement, save it
-
-            smi   63                  ; Subtract 63 from time, if less than
-            bnf   timekeep            ;  this, then keep the result as-is
-
-timedivd:   smi   3                   ; Otherwise, divide the excess part
-            inc   re                  ;  by three, adding to the 63 we saved
-            bdf   timedivd            ;  earlier so results are 64-126
-        
-            glo   re                  ; Get result of division plus 63
-            phi   re                  ;  and save over raw measurement
-
-timekeep:   ghi   re                  ; Get final result and shift left one
-            shl                         ;  bit to make room for echo flag, then
-            adi   2+1                 ;  add 1 to baud rate and set echo flag
-
-            phi   re                  ;  then store formatted result and
-            sep   sret                ;  return to caller
-
-
-          #if $ > 0fb00h
-            #error Page FA00 overflow
-          #endif
-
-
-            org   0fb00h
+            org   0fa00h
 
             ; Bits in CF interface address port
 
@@ -1525,8 +1516,10 @@ dmard:      glo   rf                    ; set dma pointer to data buffer
             out   IDE_SELECT            ; start dma input operation
             db    IDE_A_DMAIN
 
-            glo   r0                    ; if no dma overrun, complete
+            sex   r2                    ; extra instruction for timing
             sex   r2
+
+            glo   r0                    ; if no dma overrun, complete
             sm
             bz    waitret
 
@@ -1535,12 +1528,148 @@ dmard:      glo   rf                    ; set dma pointer to data buffer
             br    waitret
 
 
-          #if $ > 0fc00h
-            #error Page FB00 overflow
+boot:       ldi   stack.1               ; setup stack for mark opcode
+            phi   r2
+            ldi   stack.0
+            plo   r2
+
+            ldi   ideboot.1             ; setup stack for mark opcode
+            phi   r6
+            ldi   ideboot.0
+            plo   r6
+
+            lbr   initcall              ; jump to initialization
+
+ideboot:    sep   scall                 ; initialize ide drive
+            dw    iderst
+
+            ldi   bootpg.1              ; load boot sector to $0100
+            phi   rf
+            ldi   bootpg.0
+            plo   rf
+
+            plo   r7                    ; set lba sector number to 0
+            phi   r7
+            plo   r8
+
+            ldi   IDE_H_LBA             ; set lba mode
+            phi   r8
+
+            sep   scall                 ; read boot sector
+            dw    ideread
+
+            lbr   bootpg+6              ; jump to entry point
+
+
+            ; Return the address of the last byte of RAM. This returns the
+            ; RAM size that was discovered at boot rather than discovering
+            ; each time or having a built-in value. As a side effect, this
+            ; also updates the kernel variable containing the processor clock
+            ; frequency since there is no other way for that to happen
+            ; currently and this is a way to make it happen at start-up.
+
+freemem:    ghi   re                    ; we only need to half-save for temp
+            stxd
+
+            ldi   clkfreq.1             ; get address of bios variable
+            phi   re
+            ldi   clkfreq.0
+            plo   re
+
+            ldi   k_clkfreq.1           ; get address of kernel variable
+            phi   rf
+            ldi   k_clkfreq.0
+            plo   rf
+
+            lda   re                    ; update kernel with clock freq
+            str   rf
+            inc   rf
+            lda   re
+            str   rf
+
+            br    retvar                ; return freemem in rf
+
+
+            ; Return a bitmap of devices present in the system. This now
+            ; gives devices actually present, rather than just what has
+            ; support in the BIOS. This is discovered at boot time and then
+            ; that value is returned whenever requested.
+
+            ;   0: IDE-like disk device
+            ;   1: Floppy (no longer relevant)
+            ;   2: Bit-banged serial
+            ;   3: UART-based serial
+            ;   4: Real-time clock
+            ;   5: Non-volatile RAM
+
+getdev:     ghi   re                    ; we only need to half-save for temp
+            stxd
+
+            ldi   devbits.1             ; get address of device bitmap
+            phi   re
+            ldi   devbits.0
+            plo   re
+
+retvar:     lda   re                    ; return variable value in rf
+            phi   rf
+            lda   re
+            plo   rf
+
+            inc   r2                    ; restore re.1 from temp use
+            ldn   r2
+            phi   re
+
+            sep   sret                  ; return to caller
+
+
+
+          #if $ > 0fb00h
+            #error Page FA00 overflow
           #endif
 
 
-            org   0fc00h
+            org   0fb00h
+
+
+            ; Initialize CDP1854 UART port and set RE to indicate UART in use.
+            ; This was written for the 1802/Mini but is generic to the 1854
+            ; since it doesn't access the extra control register that the
+            ; 1802/Mini has. This means it runs at whatever baud rate the
+            ; hardware has setup since there isn't any software control on
+setbd:      ; a generic 1854 implementation.
+
+          #ifdef UART_DETECT
+            BRMK  usebbang
+          #endif
+ 
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT              ; make sure default expander group
+            db    UART_GROUP
+            sex   r2
+          #endif
+
+            inp   UART_DATA
+            inp   UART_STATUS
+
+            inp   UART_STATUS
+            ani   2fh
+            bnz   usebbang
+
+            sex   r3
+            out   UART_STATUS
+            db    19h                 ; 8 data bits, 1 stop bit, no parity
+
+          #if UART_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    NO_GROUP
+          #endif
+
+            ldi   1
+            phi   re
+            sep   sret
+
+usebbang:   lbr   btimalc
 
 
 ; READ54 inputs character from the 1854 UART by jumping to UREAD54 if baud
@@ -1868,27 +1997,27 @@ usetbd:     ani   7                     ; mask baud rate bits,
             sep   sret
 
 
-          #if $ > 0fd00h
-            #error Page FC00 overflow
+          #if $ > 0fc00h
+            #error Page FB00 overflow
           #endif
 
 
-             org     0fd00h
+            org     0fc00h
 
-initcall:    ldi     call.1             ; address of scall
-             phi     r4
-             ldi     call.0
-             plo     r4
+initcall:   ldi     call.1             ; address of scall
+            phi     r4
+            ldi     call.0
+            plo     r4
 
-             ldi     ret.1              ; address of sret
-             phi     r5
-             ldi     ret.0
-             plo     r5
+            ldi     ret.1              ; address of sret
+            phi     r5
+            ldi     ret.0
+            plo     r5
 
-             dec     r2                 ; sret needs to pop r6
-             dec     r2
+            dec     r2                 ; sret needs to pop r6
+            dec     r2
 
-             sep     r5                 ; jump to sret
+            sep     r5                 ; jump to sret
 
 
             ; Compare two strings pointed to by RF and RF and return a byte
@@ -1965,6 +2094,7 @@ memcpy:     glo   rc
 
             ; Multiply two 16-bit numbers to get a 16-bit result. The input
             ; numbers are in RF and RD and the result is returned in RB.
+
 
 mul16:      ldi   16                    ; 16 bits to process
             plo   re
@@ -2073,6 +2203,34 @@ divskip:    glo   rb                    ; shift borrow bit into result and
 
 
 
+            ; Output a zero-terminated string to current console device.
+            ;
+            ;   IN:   RF - pointer to string to output
+            ;   OUT:  RD - set to zero
+            ;         RF - left just past terminating zero byte
+
+msglp:      sep   scall                 ; call type routine
+            dw    type
+
+msg:        lda   rf                    ; load byte from message
+            bnz   msglp                 ; return if last byte
+
+            sep   sret
+
+
+            ; Output an inline zero-terminated string to console device.
+            ;
+            ;   OUT:  RD - set to zero
+
+inmsglp:    sep   scall
+            dw    type
+
+inmsg:      lda   r6
+            bnz   inmsglp
+
+            sep   sret
+
+
 
 
 input:      ldi   1                     ; preset input length to 256
@@ -2095,7 +2253,7 @@ inputl:     ghi   re                    ; disable echo
             phi   rb
 
 inloop:     sep   scall
-            dw    f_read
+            dw    read
 
             smi   127
             bdf   inloop
@@ -2117,7 +2275,7 @@ inloop:     sep   scall
 
 cr:         glo   re
             sep   scall
-            dw    f_type
+            dw    type
 
             ldi   0
 
@@ -2148,7 +2306,7 @@ save:       glo   re
             dec   rc
 
             sep   scall
-            dw    f_type
+            dw    type
             br    inloop
 
 bs:         glo   rb
@@ -2161,86 +2319,13 @@ back:       dec   rf
             inc   rc
 
             sep   scall
-            dw    f_inmsg
+            dw    inmsg
             db    8,32,8,0
             br    inloop
            
 
-          #if $ > 0fe00h
+          #if $ > 0fd00h
             #error Page FD00 overflow
-          #endif
-
-            org   0fe00h
-
-
-boot:       ldi   stack.1               ; setup stack for mark opcode
-            phi   r2
-            ldi   stack.0
-            plo   r2
-
-            mark                        ; copy p to x for inline args
-
-          #if IDE_GROUP
-            out   EXP_PORT
-            db    IDE_GROUP
-          #endif
-
-            out   RTC_PORT              ; disable banked ram so all rom
-            db    80h
-
-            lbr   sysinit               ; jump to initialization
-
-
-ideboot:    sep   scall                 ; initialize ide drive
-            dw    f_iderst
-
-          #ifdef INIT_CON
-            sep   scall
-            dw    f_setbd
-          #endif
-
-            ldi   bootpg.1              ; load boot sector to $0100
-            phi   rf
-            ldi   bootpg.0
-            plo   rf
-
-            plo   r7                    ; set lba sector number to 0
-            phi   r7
-            plo   r8
-
-            ldi   IDE_H_LBA             ; set lba mode
-            phi   r8
-
-            sep   scall                 ; read boot sector
-            dw    f_ideread
-
-            lbr   bootpg+6              ; jump to entry point
-
-
-
-; ***************************************
-; *** Type message pointed to by R[F] ***
-; ***************************************
-
-msglp:      sep   scall               ; call type routine
-            dw    f_type
-
-msg:        lda   rf                  ; load byte from message
-            bnz   msglp              ; return if last byte
-
-            sep   sret
-
-
-;   0: IDE-like disk device
-;   1: Floppy (no longer relevant)
-;   2: Bit-banged serial
-;   3: UART-based serial
-;   4: Real-time clock
-;   5: Non-volatile RAM
-
-
-          #if $ > 0ff00h
-            #error Page FE00 overflow
           #endif
 
 
@@ -2261,7 +2346,7 @@ f_rdsec:    lbr   0
 f_seek0:    lbr   0
 f_seek:     lbr   0
 f_drive:    lbr   0
-f_setbd:    lbr   timalc54
+f_setbd:    lbr   setbd
 f_mul16:    lbr   mul16
 f_div16:    lbr   div16
 f_iderst:   lbr   iderst
@@ -2290,6 +2375,61 @@ f_isalnum:  lbr   isalnum
 f_idnum:    lbr   idnum
 f_isterm:   lbr   isterm
 f_getdev:   lbr   getdev
+
+
+          #ifdef SET_BAUD
+btimalc:    ldi   (FREQ_KHZ*5)/(SET_BAUD/25)-23
+          #else
+
+btimalc:    SEMK                      ; Make output in correct state
+
+timersrt:   ldi   0                   ; Wait to make sure the line is idle,
+timeidle:   smi   1                   ;  so we don't try to measure in the
+            nop                         ;  middle of a character, we need to
+            BRSP  timersrt            ;  get 256 consecutive loops without
+            bnz   timeidle            ;  input asserted before this exits
+
+timestrt:   BRMK  timestrt            ; Stall here until start bit begins
+
+            nop                         ; Burn a half a loop's time here so
+            ldi   1                   ;  that result rounds up if closer
+
+timecnt1:   phi   re                  ; Count up in units of 9 machine cycles
+timecnt2:   adi   1                   ;  per each loop, remembering the last
+            lbz   timedone            ;  time that input is asserted, the
+            BRSP  timecnt1            ;  very last of these will be just
+            br    timecnt2            ;  before the start of the stop bit
+
+timedone:   ldi   63                  ; Pre-load this value that we will 
+            plo   re                  ;  need in the calculations later
+
+            ghi   re                  ; Get timing loop value, subtract
+            smi   23                  ;  offset of 23 counts, if less than
+            bnf   timersrt            ;  this, then too low, go try again
+          #endif
+
+            bz    timegood            ; Fold both 23 and 24 into zero, this
+            smi   1                   ;  adj is needed for 9600 at 1.8 Mhz
+
+timegood:   phi   re                  ; Got a good measurement, save it
+
+            smi   63                  ; Subtract 63 from time, if less than
+            bnf   timekeep            ;  this, then keep the result as-is
+
+timedivd:   smi   3                   ; Otherwise, divide the excess part
+            inc   re                  ;  by three, adding to the 63 we saved
+            bdf   timedivd            ;  earlier so results are 64-126
+        
+            glo   re                  ; Get result of division plus 63
+            phi   re                  ;  and save over raw measurement
+
+timekeep:   ghi   re                  ; Get final result and shift left one
+            shl                         ;  bit to make room for echo flag, then
+            adi   2+1                 ;  add 1 to baud rate and set echo flag
+
+            phi   re                  ;  then store formatted result and
+            sep   sret                ;  return to caller
+
 
 
             ; The entry points call at 0FFE0h and ret at 0FFF1h are indicated
@@ -2363,6 +2503,6 @@ ret:        plo   re                    ; save d and set x to 2
 
             org   0fff9h
 
-version:    db    2,0,0
+version:    db    2,1,0
 chsum:      db    0,0,0,0
 
