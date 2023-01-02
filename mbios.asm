@@ -485,8 +485,8 @@ scnwait:    glo   re                    ; wait until value just written
 
             lbr   bootpg+0100h
 
-          #if $ > 0f800h
-            #error Page F700 overflow
+          #if $ > 0f700h
+            #error Page F600 overflow
           #endif
 
             org   0f700h
@@ -2325,7 +2325,7 @@ back:       dec   rf
            
 
           #if $ > 0fd00h
-            #error Page FD00 overflow
+            #error Page FC00 overflow
           #endif
 
 
