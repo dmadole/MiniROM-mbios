@@ -27,13 +27,13 @@
   #define BRSP         b2               ; branch on serial space
   #define SEMK         seq              ; set serial mark
   #define SESP         req              ; set serial space
-  #define EXP_PORT     1                ; group i/o expander port
+  #define EXP_PORT     5                ; group i/o expander port
   #define EXP_MEMORY                    ; enable expansion memory
   #define IDE_GROUP    0                ; ide interface group
   #define IDE_SELECT   2                ; ide interface address port
   #define IDE_DATA     3                ; ide interface data port
-  #define RTC_GROUP    0                ; real time clock group
-  #define RTC_PORT     5                ; real time clock port
+  #define RTC_GROUP    1                ; real time clock group
+  #define RTC_PORT     3                ; real time clock port
   #define UART_GROUP   0                ; uart port group
   #define UART_DATA    6                ; uart data port
   #define UART_STATUS  7                ; uart status/command port
@@ -51,11 +51,11 @@
   #define IDE_GROUP    0                ; ide interface group
   #define IDE_SELECT   2                ; ide interface address port
   #define IDE_DATA     3                ; ide interface data port
+  #define RTC_GROUP    1                ; real time clock group
+  #define RTC_PORT     3                ; real time clock port
   #define UART_GROUP   0                ; uart port group
   #define UART_DATA    6                ; uart data port
   #define UART_STATUS  7                ; uart status/command port
-  #define RTC_GROUP    1                ; real time clock group
-  #define RTC_PORT     3                ; real time clock port
   #define SET_BAUD     9600             ; bit-bang serial fixed baud rate
   #define FREQ_KHZ     1790             ; default processor clock frequency
 #endif
