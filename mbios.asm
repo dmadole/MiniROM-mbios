@@ -2377,15 +2377,16 @@ back:       dec   rf
 
           ; Hardware definitions for the SPI card:
 
-#define SPI_NONE 0                      ; select no device
-#define SPI_OUT0 1                      ; general output bit
-#define SPI_OUT1 2                      ; general output bit
-#define SPI_CS0 4                       ; chip select device 0
-#define SPI_CS1 8                       ; chip select device 1
-#define SPI_128 16                      ; high bit of dma counter
-#define SPI_DMAIN 32                    ; enable dma input transfer
+#define SPI_NONE   0                    ; select no device
+#define SPI_OUT0   1                    ; general output bit
+#define SPI_OUT1   2                    ; general output bit
+#define SPI_CS0    4                    ; chip select device 0
+#define SPI_CS1    8                    ; chip select device 1
+#define SPI_128    16                   ; high bit of dma counter
+#define SPI_DMAIN  32                   ; enable dma input transfer
 #define SPI_DMAOUT 64                   ; enable dma output transfer
-#define SPI_COUNT 128                   ; set dma transfer byte count
+#define SPI_COUNT  128                  ; set dma transfer byte count
+
 
           ; Note that the following must be a power of two as 512 needs
           ; to be exactly divisible by it to transfer a whole sector.
@@ -2393,21 +2394,32 @@ back:       dec   rf
 #define SPI_BURST 64                    ; number of bytes per dma operation
 
 
+          ; The following are the SD Card command packets the we use in
+          ; the driver. The ones that are complete 6-byte packets are to
+          ; be sent using SENDLIT, the ones that are just the selector byte
+          ; are to be sent using SENDBLK which will create the rest.
+
+#define SD_CMD0    40h,0,0,0,0,95h
+#define SD_CMD8    48h,0,0,1,5,8fh
+#define SD_CMD13   4dh,0,0,0,0,1
+#define SD_CMD17   51h
+#define SD_CMD24   58h
+#define SD_ACMD41  69h,40h,0,0,0,1
+#define SD_CMD55   77h,0,0,0,0,1
+#define SD_CMD58   7ah,0,0,0,0,1
+
+
           ; SDRESET initializes the SD Card, if one is present. This should
           ; be called before the first read or write operations happen.
 
 sdreset:    glo   r3                    ; save and intialize registers
-            br    initreg
+            br    sdsetup
 
-            sep   r9                    ; send initial clock pulses
-            db    sendini
+            sep   r9                    ; send initial spi clock pulses
+            db    spiwake
 
-            glo   r3                    ; initialize sd card
-            br    initspi 
-
-            sex   r3                    ; hardware doesn't clear dma counter
-            out   SPI_CTRL              ;  at reset so do it here instead
-            db    SPI_COUNT
+            glo   r3                    ; initialize sd card to spi mode
+            br    spiinit 
 
             br    sdfinal               ; all done, return
 
@@ -2420,14 +2432,15 @@ sdreset:    glo   r3                    ; save and intialize registers
           ; so the card is initialized and the read then re-tried.
 
 sdread:     glo   r3                    ; save and initialize registers
-            br    initreg
+            br    sdsetup
 
-            sep   r9                    ; send initial clock pulses
-            db    sendini
+            sep   r9                    ; send initial clock pulses,
+            db    spiwake               ;  if busy then re-initialize
+            bdf   reinit
 
             sep   r9                    ; read the block from disk, if
-            db    sendblk,51h           ;  device is busy, re-initialize
-            bdf   reinit
+            db    sendblk               ;  device is busy, re-initialize
+            db    SD_CMD17
 
             sep   r9                    ; read response token
             db    recvspi
@@ -2436,11 +2449,11 @@ sdread:     glo   r3                    ; save and initialize registers
             bnf   sderror               ;  else other than timeout is error
 
 reinit:     glo   r3                    ; if timeout, initialize sd card
-            br    initspi 
+            br    spiinit
 
             sep   r9                    ; resend block read command, if
-            db    sendblk,51h           ;  busy this time, it's an error
-            bdf   sderror
+            db    sendblk               ;  busy this time, it's an error
+            db    SD_CMD17
 
             sep   r9                    ; read response token
             db    recvspi
@@ -2471,25 +2484,19 @@ rdblock:    sep   r9                    ; receive data block start token
           ; open. So, it seems safer to let these fail.
  
 sdwrite:    glo   r3                    ; save and initialize registers
-            br    initreg
+            br    sdsetup
 
-            sep   r9                    ; send initialization clocks
-            db    sendini
+            sep   r9                    ; send initial clock pulses,
+            db    spiwake               ;  if busy then it's an error
+            bdf   reinit
 
-            sep   r9                    ; send block write command, if
-            db    sendblk,58h           ;  busy then it's an error
-            bdf   sderror
+            sep   r9                    ; send block write command
+            db    sendblk
+            db    SD_CMD24
   
-            sep   r9                    ; get response token
-            db    recvspi
-
-            bnz   sderror               ; not zero or timeout is an error
-
-            sep   r9                    ; send data block start token
-            db    sendlit,1             ;  of 11111110
-            db    0feh
-
-            sex   rf                    ; rf points to the buffer
+            sep   r9                    ; get response token, error if
+            db    recvspi               ;  not zero or a timeout
+            bnz   sderror
 
             sep   r9                    ; send 512 bytes from buffer
             db    sendbuf
@@ -2501,21 +2508,17 @@ sdwrite:    glo   r3                    ; save and initialize registers
             xri   05h                   ;  error, including a timeout
             bnz   sderror
 
-isbusy:     sep   r9                    ; receive busy token
-            db    recvstk,1
-
-            lda   r2                    ; wait until token is all ones
-            xri   0ffh
-            bnz   isbusy
+            sep   r9                    ; wait while write completes, if
+            db    spibusy               ;  not within timeout, then error
+            bdf   sderror
 
             sep   r9                    ; send get device status command
             db    sendcmd
-            db    4dh,0,0,0,0,1
+            db    SD_CMD13
 
-            sep   r9                    ; receive response token
-            db    recvspi
-
-            bnz   get1err               ; not 0 or timeout is error
+            sep   r9                    ; receive response token, error if
+            db    recvspi               ;  not zero or a timeout
+            bnz   get1err
 
             sep   r9                    ; get second byte of r2 response
             db    recvstk,1
@@ -2526,12 +2529,12 @@ isbusy:     sep   r9                    ; receive busy token
             br    sdfinal               ; return with df clear
 
 
-          ; INITREG saves the registers we use and presets R9 for subroutine
+          ; SDSETUP saves the registers we use and presets R9 for subroutine
           ; calls in the other page. RE is used for temporary storage of the
           ; return address since we are pushing to the stack here. Also
           ; select the correct port group if not the default.
 
-initreg:    adi   2                     ; save return address following br
+sdsetup:    adi   2                     ; save return address following br
             plo   re
 
             ghi   re                    ; save to use as transfer counter
@@ -2564,22 +2567,22 @@ initreg:    adi   2                     ; save return address following br
           ; by byte or by block. So this information is saved during initial-
           ; ization for later reference in sending read and write commands.
 
-initspi:    adi   2                     ; save return address following br
+spiinit:    adi   2                     ; save return address following br
             str   r2
 
-retry:      sep   r9                    ; send reset command
+sdretry:    sep   r9                    ; send reset command
             db    sendcmd
-            db    40h,0,0,0,0,95h
+            db    SD_CMD0
 
             sep   r9                    ; get response token
             db    recvspi
 
             xri   1                     ; timeout or other than 1 is error
-            bnz   retry
+            bnz   sdretry
 
             sep   r9                    ; send host voltage support
             db    sendcmd
-            db    48h,0,0,1,5,8fh
+            db    SD_CMD8
 
             sep   r9                    ; get response token
             db    recvspi
@@ -2597,7 +2600,7 @@ retry:      sep   r9                    ; send reset command
 
 waitini:    sep   r9                    ; send application command escape
             db    sendcmd
-            db    77h,0,0,0,0,1
+            db    SD_CMD55
 
             sep   r9
             db    recvspi               ; get response token
@@ -2607,7 +2610,7 @@ waitini:    sep   r9                    ; send application command escape
 
             sep   r9                    ; send host capacity support
             db    sendcmd
-            db    69h,40h,0,0,0,1
+            db    SD_ACMD41
 
             sep   r9                    ; get reponse token
             db    recvspi
@@ -2619,7 +2622,7 @@ waitini:    sep   r9                    ; send application command escape
 
             sep   r9                    ; get ocr register
             db    sendcmd
-            db    7ah,0,0,0,0,1
+            db    SD_CMD58
 
             sep   r9                    ; get first byte of response
             db    recvspi
@@ -2697,26 +2700,57 @@ sdfinal:    sex   r3                    ; output inline data
 
 
           ; After power-on an SD Card may require up to 74 clock pulses
-          ; to be able to initialize, so we send extra pulses before each
-          ; initial block command in case the card was freshly inserted.
-          ; 80 pulses are sent since we can only send 8 at a time.
+          ; to be able to initialize; we send 80 since we can only send 80
+          ; at a time. This gets send during bus reset, but also before each
+          ; initial read or write command in case the card was hot-swapped.
+          ; After sending, we fall through to checking if the card is busy.
 
-sendini:    sex   r9
+spiwake:    sex   r9
 
             ldi   80/8                  ; 80 pulses send a byte at a time
 
-loopini:    out   SPI_DATA              ; send pulse, decrement pulse count
+spiclks:    out   SPI_DATA              ; send eight pulses, keep MOSI high
             db    0ffh
 
-            smi   1                     ; send pulse, loop if count not zero
-            bnz   loopini
+            smi   1                     ; loop if count not zero
+            bnz   spiclks
 
             out   SPI_CTRL              ; assert chip select to sd card
             db    SPI_CS1
 
-            sep   r3                    ; return
 
-            lda   r3                    ; subroutine call re-entry point
+          ; Check if the card is busy, meaning that the MISO line is low
+          ; rather than high. We need to wait for a timeout interval before
+          ; deciding because it's possible (like if the machine was reset)
+          ; that a previously-ordered write operation could be completing.
+          ; Sending a CMD0 during a write operation could damage the SD Card
+          ; so we want to be sure to avoid this possibility.
+
+spibusy:    ldi   5+(FREQ_KHZ/40)       ; use about a one-second timeout
+            phi   re
+
+spiwait:    sex   r9                    ; send 8 clocks to warm up receiver
+            out   SPI_DATA              ;  and clock in current line state
+            db    0ffh
+
+            sex   r2                    ; get the input line state, if not
+            inp   SPI_DATA              ;  high, card is busy, return df set
+            sdi   0feh
+            bnf   spiidle
+
+            dec   re
+            ghi   re
+            bnz   spiwait
+
+spiidle:    sep   r3
+
+          ; Entry point of subroutine calls. This is called via SEP R9 with
+          ; individual subroutine address within the page passed in D, which
+          ; it simply jumps to by storing to the lsb of the program counter.
+          ; This is duplicated after each subroutine return so that the R9
+          ; register does not need to be reset for each call.
+
+subjump:    lda   r3
             plo   r9
 
 
@@ -2727,30 +2761,15 @@ loopini:    out   SPI_DATA              ; send pulse, decrement pulse count
           ; capacity or not so we know what address format to use. The first
           ; byte specifying the read or write command is passed inline.
 
-sendblk:    ldi   255
-            plo   re
-            ldi   100
-            phi   re
-
-blkwait:    sex   r9                    ; send 8 clocks to warm up receiver
-            out   SPI_DATA              ;  and clock in current line state
+sendblk:    sex   r9                    ; send 8 clocks before command to
+            out   SPI_DATA              ;  warm up receiver
             db    0ffh
 
-            sex   r2                    ; get the input line state, if not
-            inp   SPI_DATA              ;  high, card is busy, return df set
-            sdi   0ffh
-            bz    blkidle
-
-            dec   re
-            ghi   re
-            bnz   blkwait
-            br    spiretn
-
-blkidle:    dec   r2                    ; for post-out opcode increment
+            sex   r2
+            dec   r2                    ; for post-out opcode increment
 
             ldi   1                     ; dummy zero crc with stop bit
             stxd
-
 
           ; Different types of SD cards address content differently, so we
           ; need to handle two cases here depending on what kind of card we
@@ -2764,7 +2783,6 @@ blkidle:    dec   r2                    ; for post-out opcode increment
             ldn   re                    ; if set, card is high-capacity
             ani   40h
             bnz   sdhcblk
-
 
           ; SDSC cards address content by byte and so the Elf/OS block address
           ; needs to be multiplied by 512, which is nine left bit shifts, or
@@ -2784,7 +2802,6 @@ blkidle:    dec   r2                    ; for post-out opcode increment
 
             br    execcmd
 
-
           ; SDHC and SDXC cards address content in 512-byte blocks, which is
           ; the same as Elf/OS so we just store the block address into the
           ; low three bytes of the address in the command packet.
@@ -2801,8 +2818,7 @@ sdhcblk:    glo   r7                    ; we only use the low three bytes,
 execcmd:    lda   r3                    ; copy inline command byte to stack
             str   r2
 
-            ldi   6                     ; send from stack for 6 bytes
-            br    sendspi
+            br    sendpkt
 
 
           ; Send an inline command packet to the card. The length is always
@@ -2813,37 +2829,15 @@ sendcmd:    sex   r9                    ; send 8 clocks before command to
             db    0ffh
 
             sex   r3                    ; send inline data for 6 bytes
-            ldi   6
-            br    sendspi
+sendpkt:    ldi   6
 
-
-          ; Send literal bytes inline with the subroutine call. This is used
-          ; to send command packets with payloads that the prior cases cannot
-          ; handle, and for commands where the CRC needs to be correct, as
-          ; well as for data tokens and CRCs.
-
-sendlit:    sex   r3                    ; count is inline as are bytes
-            lda   r3
-
-
-          ; Send data through SPI from memory starting at RX for RE.0 bytes.
-          ; Leaves RX just past sent data and RE.0 set to zero.
-
-sendspi:    out   SPI_DATA              ; send next byte, advance pointer,
+spiloop:    out   SPI_DATA              ; send next byte, advance pointer,
             smi   1                     ;  decrement count, loop if more
-            bnz   sendspi
+            bnz   spiloop
 
-            shr 
-spiretn:    sep   r3                    ; return
+            sep   r3                    ; return
 
-
-          ; Entry point of subroutine calls. This is called via SEP R9 with
-          ; individual subroutine address within the page passed in D, which
-          ; it simply jumps to by storing to the lsb of the program counter.
-          ; This is duplicated after each subroutine return so that the R9
-          ; register does not need to be reset for each call.
-
-subjump:    lda   r3
+            lda   r3                    ; jump to next subroutine
             plo   r9
 
 
@@ -2852,33 +2846,25 @@ subjump:    lda   r3
           ; non-$FF value is seen within one second, then a timeout occured,
           ; and $FF is returned in D with DF set. Otherwise, DF is cleared.
 
-recvspi:    ldi   100                   ; 100 is about 1 second at 4 Mhz
+recvspi:    ldi   5+(FREQ_KHZ/40)       ; use about a one-second timeout
             phi   re
-            ldi   255
-            plo   re
 
-            dec   r2
+            dec   r2                    ; preserve current top of stack
 
-            adi   0
-
-recvwait:   sex   r9
+recvwait:   sex   r9                    ; send ff to clock in new byte
             out   SPI_DATA
             db    0ffh
 
-            sex   r2
-            inp   SPI_DATA
-
-            xri   0ffh
-            bnz   recvbyte
+            sex   r2                    ; get byte, if not ff then exit
+            inp   SPI_DATA              ;  with df clear, else set df
+            smi   0ffh
+            bnf   recvbyte
 
             dec   re                    ; decrement count, loop if more
             ghi   re
             bnz   recvwait
 
-            smi   0                     ; set df to signal timeout
-
-recvbyte:   lda   r2
-
+recvbyte:   lda   r2                    ; recover input byte and return
             sep   r3
 
             lda   r3                    ; subroutine entry jump vector
@@ -2892,9 +2878,7 @@ recvbyte:   lda   r2
 recvstk:    lda   r3                    ; get inline length to receive
             plo   re
 
-rstkloop:   dec   re                    ; decrement received bytes count,
-
-            sex   r9
+rstkloop:   sex   r9
             out   SPI_DATA
             db    0ffh
 
@@ -2902,6 +2886,7 @@ rstkloop:   dec   re                    ; decrement received bytes count,
             dec   r2
             inp   SPI_DATA
 
+            dec   re                    ; decrement received bytes count,
             glo   re
             bnz   rstkloop
 
@@ -2917,8 +2902,14 @@ rstkloop:   dec   re                    ; decrement received bytes count,
 
 sendbuf:    sex   r9                    ; inline arguments for out
 
-            out   SPI_CTRL              ; assert dma out to start transfer
+            out   SPI_CTRL              ; so we don't start unintentionally
+            db    SPI_COUNT
+
+            out   SPI_CTRL              ; enable dma out transfer mode
             db    SPI_CS1+SPI_DMAOUT
+
+            out   SPI_DATA              ; send data block start token
+            db    0feh
 
             glo   r9                    ; perform the dma transfer itself
             br    dmaxfer
@@ -2940,6 +2931,9 @@ sendbuf:    sex   r9                    ; inline arguments for out
           ; the two CRC bytes that follow the block data.
 
 recvbuf:    sex   r9                    ; inline arguments for out
+
+            out   SPI_CTRL              ; so we don't start unintentionally
+            db    SPI_COUNT
 
             out   SPI_CTRL              ; enable dma-in transfer mode
             db    SPI_CS1+SPI_DMAIN
