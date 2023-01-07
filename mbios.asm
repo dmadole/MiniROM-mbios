@@ -2415,9 +2415,6 @@ back:       dec   rf
 sdreset:    glo   r3                    ; save and intialize registers
             br    sdsetup
 
-            sep   r9                    ; send initial spi clock pulses
-            db    spiwake
-
             glo   r3                    ; initialize sd card to spi mode
             br    spiinit 
 
@@ -2432,31 +2429,22 @@ sdreset:    glo   r3                    ; save and intialize registers
           ; so the card is initialized and the read then re-tried.
 
 sdread:     glo   r3                    ; save and initialize registers
-            br    sdsetup
-
-            sep   r9                    ; send initial clock pulses,
-            db    spiwake               ;  if busy then re-initialize
+            br    sdsetup               ;  if busy then re-initialize
             bdf   reinit
 
-            sep   r9                    ; read the block from disk, if
-            db    sendblk               ;  device is busy, re-initialize
+            sep   r9                    ; read the block from disk
+            db    sendblk
             db    SD_CMD17
 
-            sep   r9                    ; read response token
-            db    recvspi
-
-            bz    rdblock               ; read block if response is zero,
+            bz    rdblock               ; get the data if response is zero,
             bnf   sderror               ;  else other than timeout is error
 
 reinit:     glo   r3                    ; if timeout, initialize sd card
             br    spiinit
 
-            sep   r9                    ; resend block read command, if
-            db    sendblk               ;  busy this time, it's an error
+            sep   r9                    ; resend block read command
+            db    sendblk
             db    SD_CMD17
-
-            sep   r9                    ; read response token
-            db    recvspi
 
             bnz   sderror               ; timeout or non-zero is error
 
@@ -2484,25 +2472,17 @@ rdblock:    sep   r9                    ; receive data block start token
           ; open. So, it seems safer to let these fail.
  
 sdwrite:    glo   r3                    ; save and initialize registers
-            br    sdsetup
-
-            sep   r9                    ; send initial clock pulses,
-            db    spiwake               ;  if busy then it's an error
+            br    sdsetup               ;  if busy then it's an error
             bdf   reinit
 
             sep   r9                    ; send block write command
             db    sendblk
             db    SD_CMD24
   
-            sep   r9                    ; get response token, error if
-            db    recvspi               ;  not zero or a timeout
             bnz   sderror
 
             sep   r9                    ; send 512 bytes from buffer
             db    sendbuf
-
-            sep   r9                    ; get data response token
-            db    recvspi
 
             ani   1fh                   ; response other than xxx00101 is
             xri   05h                   ;  error, including a timeout
@@ -2516,8 +2496,6 @@ sdwrite:    glo   r3                    ; save and initialize registers
             db    sendcmd
             db    SD_CMD13
 
-            sep   r9                    ; receive response token, error if
-            db    recvspi               ;  not zero or a timeout
             bnz   get1err
 
             sep   r9                    ; get second byte of r2 response
@@ -2531,13 +2509,13 @@ sdwrite:    glo   r3                    ; save and initialize registers
 
           ; SDSETUP saves the registers we use and presets R9 for subroutine
           ; calls in the other page. RE is used for temporary storage of the
-          ; return address since we are pushing to the stack here. Also
-          ; select the correct port group if not the default.
+          ; return address since we are pushing to the stack here. This
+          ; calls SPIWAKE which actually performs the return from here also.
 
 sdsetup:    adi   2                     ; save return address following br
             plo   re
 
-            ghi   re                    ; save to use as transfer counter
+            ghi   re                    ; save to use for scratch and counter
             stxd
 
             glo   r9                    ; save to use for subroutine call
@@ -2550,14 +2528,8 @@ sdsetup:    adi   2                     ; save return address following br
             ldi   subjump.0
             plo   r9
 
-           #if SPI_GROUP
-            sex   r3
-            out   EXP_PORT
-            db    SPI_GROUP
-           #endif
-
-            glo   re                    ; return to caller
-            plo   r3
+            sep   r9                    ; send initial spi clock pulses
+            db    spiwake
 
 
           ; INITSPI initializes an SD Card into SPI mode by sending the
@@ -2574,18 +2546,12 @@ sdretry:    sep   r9                    ; send reset command
             db    sendcmd
             db    SD_CMD0
 
-            sep   r9                    ; get response token
-            db    recvspi
-
             xri   1                     ; timeout or other than 1 is error
             bnz   sdretry
 
             sep   r9                    ; send host voltage support
             db    sendcmd
             db    SD_CMD8
-
-            sep   r9                    ; get response token
-            db    recvspi
 
             xri   1                     ; timeout or other than 1 is error
             bnz   get4err
@@ -2602,18 +2568,12 @@ waitini:    sep   r9                    ; send application command escape
             db    sendcmd
             db    SD_CMD55
 
-            sep   r9
-            db    recvspi               ; get response token
-
             xri   1                     ; timeout or other than 1 is error
             bnz   sderror
 
             sep   r9                    ; send host capacity support
             db    sendcmd
             db    SD_ACMD41
-
-            sep   r9                    ; get reponse token
-            db    recvspi
 
             shr                         ; if not 0 or 1, then error
             bnz   sderror
@@ -2623,9 +2583,6 @@ waitini:    sep   r9                    ; send application command escape
             sep   r9                    ; get ocr register
             db    sendcmd
             db    SD_CMD58
-
-            sep   r9                    ; get first byte of response
-            db    recvspi
 
             bnz   get4err               ; fail on error or timeout
 
@@ -2705,7 +2662,15 @@ sdfinal:    sex   r3                    ; output inline data
           ; initial read or write command in case the card was hot-swapped.
           ; After sending, we fall through to checking if the card is busy.
 
-spiwake:    sex   r9
+spiwake:    glo   re                    ; return from sdsetup when done
+            plo   r3
+
+            sex   r9                    ; use inline out arguments
+
+           #if SPI_GROUP
+            out   EXP_PORT              ; set port group if not default
+            db    SPI_GROUP
+           #endif
 
             ldi   80/8                  ; 80 pulses send a byte at a time
 
@@ -2754,6 +2719,16 @@ subjump:    lda   r3
             plo   r9
 
 
+          ; Send an inline literal 6-byte command packet to the card.
+
+sendcmd:    sex   r9                    ; send 8 clocks before command to
+            out   SPI_DATA              ;  warm up receiver
+            db    0ffh
+
+            sex   r3                    ; send inline data for 6 bytes
+            br    sendpkt
+
+
           ; Send a block read or write command by building the command packet
           ; on the stack including the appropriate address from R8:R7 and
           ; then sending it. The OCR register byte that is retreived during
@@ -2788,9 +2763,8 @@ sendblk:    sex   r9                    ; send 8 clocks before command to
           ; needs to be multiplied by 512, which is nine left bit shifts, or
           ; one byte shift plus one extra bit.
 
-            ldi   0                     ; lowest byte is always zero, store
-            stxd                        ;  shifted left address in next three
-            glo   r7
+            stxd                        ; lowest byte is always zero, store
+            glo   r7                    ;  shifted left address in next three
             shl
             stxd
             ghi   r7
@@ -2818,27 +2792,11 @@ sdhcblk:    glo   r7                    ; we only use the low three bytes,
 execcmd:    lda   r3                    ; copy inline command byte to stack
             str   r2
 
-            br    sendpkt
-
-
-          ; Send an inline command packet to the card. The length is always
-          ; six bytes.
-
-sendcmd:    sex   r9                    ; send 8 clocks before command to
-            out   SPI_DATA              ;  warm up receiver
-            db    0ffh
-
-            sex   r3                    ; send inline data for 6 bytes
 sendpkt:    ldi   6
 
 spiloop:    out   SPI_DATA              ; send next byte, advance pointer,
             smi   1                     ;  decrement count, loop if more
             bnz   spiloop
-
-            sep   r3                    ; return
-
-            lda   r3                    ; jump to next subroutine
-            plo   r9
 
 
           ; Receive a single byte through SPI, first skiping any $FF bytes
@@ -2919,10 +2877,7 @@ sendbuf:    sex   r9                    ; inline arguments for out
             out   SPI_DATA
             db    0
 
-            sep   r3                    ; return to caller
-
-            lda   r3                    ; jump to next subroutine called
-            plo   r9
+            br    recvspi               ; get response token
 
 
           ; Receive bytes through SPI into memory at RF for 512 bytes. This
@@ -2944,7 +2899,7 @@ recvbuf:    sex   r9                    ; inline arguments for out
             glo   r9                    ; perform the dma transfer itself
             br    dmaxfer
 
-            out   SPI_DATA              ; discard extra crc byte at end
+            out   SPI_DATA              ; get second crc byte and discard
             db    0ffh
 
             sep   r3                    ; return to caller
