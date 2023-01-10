@@ -116,6 +116,9 @@ devbits:    equ   0036h                 ; f_getdev device present result
 clkfreq:    equ   0038h                 ; processor clock frequency in khz
 lastram:    equ   003ah                 ; f_freemem last ram address result
 ocrreg:     equ   003ch                 ; ocr register of inserted sd card
+diskwr:     equ   003dh                 ; disk write vector
+diskrd:     equ   0040h                 ; disk read vector
+diskck:     equ   0043h                 ; checksum of disk vectors
 
 scratch:    equ   0080h                 ; pre-boot scratch buffer memory
 stack:      equ   00ffh                 ; top of temporary booting stack
@@ -131,10 +134,245 @@ k_clkfreq:  equ   0470h                 ; processor clock frequency in khz
             ; The BIOS is divided into two parts, an always-resident part
             ; from F800-FFFF that is always mapped into memory and an
             ; initialization-only part that is below F800, and is currently
-            ; F600-F7FF. This part is used for things that only need to 
+            ; F500-F7FF. This part is used for things that only need to 
             ; happen at a hard reset and never again, so that ROM space can
             ; be paged out and replaced with RAM when booting.
 
+
+            org   0f500h
+
+            ; Enable expander card memory (this code runs from low RAM).
+            ; If the expander card is not present, this does nothing.
+
+raminit:    sex   r3                    ; enable banked ram
+
+          #ifdef EXP_MEMORY
+            out   RTC_PORT
+            db    81h
+          #endif
+
+          #if RTC_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    NO_GROUP
+          #endif
+
+
+            ; Find the last address of RAM present in the system. The search
+            ; is done with a granularity of one page; this is not reliable
+            ; on systems that do not have an integral number of pages of RAM.
+            ;
+            ; This implementation is safe for systems with EEPROM, which will
+            ; go into a write cycle when a write is attempted to it, even when
+            ; software write-protected. When this happens, data read is not
+            ; valid until the end of the write cycle. The safety of this
+            ; routine in this situation is accomplished by copying the code
+            ; into RAM and running it from there instead of from ROM. This
+            ; is run once at system initialization and the value stored and
+            ; later that stored value is returned by f_freemem.
+            ;
+            ; In case this is run against an EEPROM that is not software
+            ; write-protected (not recommended) this attempts to randomize
+            ; the address within the page tested to distribute wear across
+            ; the memory cells in the first page of the EEPROM.
+
+            ldi   3fh                   ; we must have at least 16K
+            phi   rf
+
+            sex   rf                    ; rf is pointer to search address
+
+scnloop:    glo   rf                    ; randomize address within page
+            xor
+            plo   rf
+
+            ghi   rf                    ; advance pointer to next page
+            adi   1
+            phi   rf
+
+            ldi   0                     ; get contents of memory, save it,
+            xor                         ;  then complement it
+            plo   re
+            xri   255
+
+            str   rf                    ; write complement back, then read,
+            xor                         ;  if not the same then set df
+            adi   255
+
+            glo   re                    ; restore original value
+            str   rf
+  
+scnwait:    glo   re                    ; wait until value just written
+            xor                         ;  reads back again
+            bnz   scnwait
+
+            bnf   scnloop
+
+            ghi   rf
+            smi   1
+            str   ra
+
+            inc   ra
+            ldi   0ffh
+            str   ra
+
+            ;
+            ;
+
+bootmsg:    ldi   devbits.1             ; pointer to memory variables
+            phi   ra
+            ldi   devbits.0
+            plo   ra
+
+          #ifdef INIT_CON
+            sep   scall
+            dw    setbd
+          #endif
+
+            sep   scall
+            dw    inmsg
+            db    13,10
+            db    13,10
+            db    'MBIOS 2.1.0',13,10
+            db    'Devices: ',0
+
+            inc   ra
+            lda   ra
+            plo   rb
+
+            ldi   bootpg.1
+            phi   rd
+            ldi   devname.0
+            plo   rd
+
+devloop:    glo   rb
+            shr
+            plo   rb
+            bnf   skipdev
+
+            ghi   rd
+            phi   rf
+            glo   rd
+            plo   rf
+
+            sep   scall
+            dw    msg
+
+            ldi   ' '
+            sep   scall
+            dw    type
+
+skipdev:    lda   rd
+            bnz   skipdev
+
+            ldn   rd
+            bnz   devloop
+
+            sep   scall
+            dw    inmsg
+            db    13,10
+            db    'Clock: ',0
+
+            ldi   scratch.1
+            phi   rf
+            ldi   scratch.0
+            plo   rf
+
+            lda   ra
+            phi   rd
+            lda   ra
+            plo   rd
+
+            sep   scall
+            dw    uintout
+
+            ldi   0
+            str   rf
+
+            ldi   scratch.1
+            phi   rf
+            ldi   scratch.0
+            plo   rf
+
+            sep   scall
+            dw    msg
+
+            sep   scall
+            dw    inmsg
+            db    ' KHz'13,10
+            db    'Memory: ',0
+
+            ldi   0
+            phi   rd
+            lda   ra
+            shr
+            shr
+            adi   1
+            plo   rd
+
+            ldi   scratch.1
+            phi   rf
+            ldi   scratch.0
+            plo   rf
+
+            sep   scall
+            dw    uintout
+
+            ldi   0
+            str   rf
+
+            ldi   scratch.1
+            phi   rf
+            ldi   scratch.0
+            plo   rf
+
+            sep   scall
+            dw    msg
+
+            sep   scall
+            dw    inmsg
+            db    ' KB',13,10
+            db    13,10,0
+
+doboot:
+
+            ; Now that all initialization has been done, boot the system by
+            ; simply jumping to ideboot.
+
+          #ifdef IDE_SETTLE
+            ldi   255
+            plo   rf
+            ldi   ((FREQ_KHZ/32)*(IDE_SETTLE/20))/51
+
+bootdly:    phi   rf
+            dec   rf
+            ghi   rf
+            bnz   bootdly
+          #endif
+
+            lbr   ideboot
+
+
+
+            ;   0: IDE-like disk device
+            ;   1: Floppy (no longer relevant)
+            ;   2: Bit-banged serial
+            ;   3: UART-based serial
+            ;   4: Real-time clock
+            ;   5: Non-volatile RAM
+
+devname:    db  'IDE',0                 ; bit 0
+            db  'Floppy',0              ; bit 1
+            db  'Serial',0              ; bit 2
+            db  'UART',0                ; bit 3
+            db  'RTC',0                 ; bit 4
+            db   0
+
+
+endinit:    equ   $
+
+
+          #if $ > 0f600h
+            #error Page F500 overflow
+          #endif
 
             org   0f600h
 
@@ -379,6 +617,91 @@ tknloop:    ldi   0c0h                  ; write lbr opcode and address
             bnz   tknloop
 
 
+          ; Check the disk I/O vectors in BIOS RAM to see if they are valid
+          ; by calculating CRC8 over them and checking against the stored sum
+
+            ldi   diskwr.1
+            phi   rf
+            ldi   diskwr.0
+            plo   rf
+
+            ldi   6
+            phi   rd
+
+            sep   scall
+            dw    crc8itu
+
+            sex   rf
+            xor
+            lbz   sizeram
+
+
+          ; If not valid, then copy the compiled-in defaults into RAM.
+
+            ldi   diskwr.1
+            phi   rd
+            ldi   diskwr.0
+            plo   rd
+
+          #ifdef USE_SDCARD
+            ldi   sddeflt.1
+            phi   rf
+            ldi   sddeflt.0
+            plo   rf
+          #else
+            ldi   cfdeflt.1
+            phi   rf
+            ldi   cfdeflt.0
+            plo   rf
+          #endif
+
+            ldi   6
+            plo   re
+
+copylp:     lda   rf
+            str   rd
+            inc   rd
+
+            dec   re
+            glo   re
+            bnz   copylp
+
+
+          ; Now update the CRC in BIOS RAM so these will be valid until next
+          ; power cycle.
+
+            ldi   diskwr.1
+            phi   rf
+            ldi   diskwr.0
+            plo   rf
+
+            ldi   6
+            phi   rd
+
+            sep   scall
+            dw    crc8itu
+
+            str   rf
+
+            lbr   sizeram
+
+
+          #if $ > 0f700h
+            #error Page F600 overflow
+          #endif
+
+            org   0f700h
+
+
+cfdeflt:    lbr   cfpriwr
+            lbr   cfprird
+sddeflt:    lbr   sdpriwr
+            lbr   sdprird
+
+            lbr   crc8itu
+
+
+
             ; It's not safe to run the expansion memory enable and memory
             ; scan code from ROM for two reasons: we are running from part
             ; of the ROM that will disappear once RAM is switched in, and
@@ -388,7 +711,7 @@ tknloop:    ldi   0c0h                  ; write lbr opcode and address
             ; So copy these routines to RAM in the boot sector page first,
             ; then run it from there, and we will jump to BIOS boot after.
 
-            ldi   raminit.1             ; get start of code to copy
+sizeram:    ldi   raminit.1             ; get start of code to copy
             phi   rc
 
             ldi   bootpg.1              ; get address to copy to
@@ -406,247 +729,49 @@ tknloop:    ldi   0c0h                  ; write lbr opcode and address
 cpyloop:    lda   rc                    ; copy each byte to ram
             str   rd
             inc   rd
+
             dec   re
             glo   re
             bnz   cpyloop
             ghi   re
             bnz   cpyloop
 
-            ldi   bootpg.1              ; jump to copy in ram
-            phi   r3
+            lbr   bootpg
 
 
-            ; Enable expander card memory (this code runs from low RAM).
-            ; If the expander card is not present, this does nothing.
+crc8itu:    sex   rf
 
-raminit:    sex   r3                    ; enable banked ram
-
-          #ifdef EXP_MEMORY
-            out   RTC_PORT
-            db    81h
-          #endif
-
-          #if RTC_GROUP
-            out   EXP_PORT              ; make sure default expander group
-            db    NO_GROUP
-          #endif
-
-
-            ; Find the last address of RAM present in the system. The search
-            ; is done with a granularity of one page; this is not reliable
-            ; on systems that do not have an integral number of pages of RAM.
-            ;
-            ; This implementation is safe for systems with EEPROM, which will
-            ; go into a write cycle when a write is attempted to it, even when
-            ; software write-protected. When this happens, data read is not
-            ; valid until the end of the write cycle. The safety of this
-            ; routine in this situation is accomplished by copying the code
-            ; into RAM and running it from there instead of from ROM. This
-            ; is run once at system initialization and the value stored and
-            ; later that stored value is returned by f_freemem.
-            ;
-            ; In case this is run against an EEPROM that is not software
-            ; write-protected (not recommended) this attempts to randomize
-            ; the address within the page tested to distribute wear across
-            ; the memory cells in the first page of the EEPROM.
-
-            ldi   3fh                   ; we must have at least 16K
-            phi   rf
-
-            sex   rf                    ; rf is pointer to search address
-
-scnloop:    glo   rf                    ; randomize address within page
-            xor
-            plo   rf
-
-            ghi   rf                    ; advance pointer to next page
-            adi   1
-            phi   rf
-
-            ldi   0                     ; get contents of memory, save it,
-            xor                         ;  then complement it
+            ldi   0
             plo   re
-            xri   255
 
-            str   rf                    ; write complement back, then read,
-            xor                         ;  if not the same then set df
-            adi   255
-
-            glo   re                    ; restore original value
-            str   rf
-  
-scnwait:    glo   re                    ; wait until value just written
-            xor                         ;  reads back again
-            bnz   scnwait
-
-            bnf   scnloop
-
-            ghi   rf
-            smi   1
-            str   ra
-
-            inc   ra
-            ldi   0ffh
-            str   ra
-
-            lbr   bootpg+0100h
-
-          #if $ > 0f700h
-            #error Page F600 overflow
-          #endif
-
-            org   0f700h
-
-            ;
-            ;
-
-bootmsg:    ldi   devbits.1             ; pointer to memory variables
-            phi   ra
-            ldi   devbits.0
-            plo   ra
-
-          #ifdef INIT_CON
-            sep   scall
-            dw    setbd
-          #endif
-
-            sep   scall
-            dw    inmsg
-            db    13,10
-            db    13,10
-            db    'MBIOS 2.1.0',13,10
-            db    'Devices: ',0
-
-            inc   ra
-            lda   ra
-            plo   rb
-
-            ghi   r3
-            phi   rd
-            ldi   devname.0
+crc8byt:    ldi   8
             plo   rd
 
-devloop:    glo   rb
-            shr
-            plo   rb
-            bnf   skipdev
+            glo   re
+            xor
+            plo   re
 
-            ghi   rd
-            phi   rf
+crc8bit:    glo   re
+            shl
+
+            bnf   crc8zer
+            xri   07h
+
+crc8zer:    plo   re
+
+            dec   rd
             glo   rd
-            plo   rf
+            bnz   crc8bit
 
-            sep   scall
-            dw    msg
+            inc   rf
 
-            ldi   ' '
-            sep   scall
-            dw    type
+            dec   rd
+            ghi   rd
+            bnz   crc8byt
 
-skipdev:    lda   rd
-            bnz   skipdev
-
-            ldn   rd
-            bnz   devloop
-
-            sep   scall
-            dw    inmsg
-            db    13,10
-            db    'Clock: ',0
-
-            ldi   scratch.1
-            phi   rf
-            ldi   scratch.0
-            plo   rf
-
-            lda   ra
-            phi   rd
-            lda   ra
-            plo   rd
-
-            sep   scall
-            dw    uintout
-
-            ldi   0
-            str   rf
-
-            ldi   scratch.1
-            phi   rf
-            ldi   scratch.0
-            plo   rf
-
-            sep   scall
-            dw    msg
-
-            sep   scall
-            dw    inmsg
-            db    ' KHz'13,10
-            db    'Memory: ',0
-
-            ldi   0
-            phi   rd
-            lda   ra
-            shr
-            shr
-            adi   1
-            plo   rd
-
-            ldi   scratch.1
-            phi   rf
-            ldi   scratch.0
-            plo   rf
-
-            sep   scall
-            dw    uintout
-
-            ldi   0
-            str   rf
-
-            ldi   scratch.1
-            phi   rf
-            ldi   scratch.0
-            plo   rf
-
-            sep   scall
-            dw    msg
-
-            sep   scall
-            dw    inmsg
-            db    ' KB',13,10
-            db    13,10,0
-
-
-            ; Now that all initialization has been done, boot the system by
-            ; simply jumping to ideboot.
-
-          #ifdef IDE_SETTLE
-            ldi   255
-            plo   rf
-            ldi   ((FREQ_KHZ/32)*(IDE_SETTLE/20))/51
-
-bootdly:    phi   rf
-            dec   rf
-            ghi   rf
-            bnz   bootdly
-          #endif
-
-            lbr   ideboot
-
-            ;   0: IDE-like disk device
-            ;   1: Floppy (no longer relevant)
-            ;   2: Bit-banged serial
-            ;   3: UART-based serial
-            ;   4: Real-time clock
-            ;   5: Non-volatile RAM
-
-devname:    db  'IDE',0                 ; bit 0
-            db  'Floppy',0              ; bit 1
-            db  'Serial',0              ; bit 2
-            db  'UART',0                ; bit 3
-            db  'RTC',0                 ; bit 4
-            db   0
-
-endinit:    equ   $
+            glo   re
+            xri   55h
+            sep   sret
 
 
           #if $ > 0f800h
@@ -1304,9 +1429,7 @@ numret:     glo   re                    ; restore and return
 
 #define IDE_F_8BIT  01h                 ; 8-bit mode
 
-
-
-iderst:     sex   r3                    ; use inline arguments
+cfreset:    sex   r3                    ; use inline arguments
 
           #if IDE_GROUP
             out   EXP_PORT              ; select ide port group
@@ -1384,7 +1507,11 @@ rdyerr:     sex   r3                    ; select error register
 
             ; Write operations use the IDE write command and DMA OUT.
 
-idewrt:     ldi   dmawrt.0              ; address of write routine
+cfpriwr:    ghi   r8                    ; if second drive, do sdcard
+            ani   1fh
+            lbnz  sdwrite
+
+cfwrite:    ldi   dmawrt.0              ; address of write routine
             stxd
             ldi   IDE_C_WRITE           ; write sector command
             stxd
@@ -1393,7 +1520,11 @@ idewrt:     ldi   dmawrt.0              ; address of write routine
  
             ; Read operations use the IDE read command and DMA IN.
 
-ideread:    ldi   dmard.0               ; address of read routine
+cfprird:    ghi   r8                    ; if second drive, do sdcard
+            ani   1fh
+            lbnz  sdread
+
+cfread:     ldi   dmard.0               ; address of read routine
             stxd
             ldi   IDE_C_READ            ; read sector command
             stxd
@@ -1411,8 +1542,6 @@ execide:    sex   r3                    ; inline out arguments
             dw    waitrdy
             bdf   idepop
 
-            ghi   r8                    ; push device select
-            stxd
             glo   r8                    ; push lba high byte
             stxd
             ghi   r7                    ; push lba middle byte
@@ -1420,9 +1549,8 @@ execide:    sex   r3                    ; inline out arguments
             glo   r7                    ; push lba low byte
             str   r2
 
-            sex   r3                    ; inline out arguments
-
-            out   IDE_SELECT            ; set sector count to one
+            sex   r3                    ; set sector count to one
+            out   IDE_SELECT
             db    IDE_R_COUNT
             out   IDE_DATA
             db    1
@@ -1444,13 +1572,7 @@ execide:    sex   r3                    ; inline out arguments
             sex   r2
             out   IDE_DATA
  
-            sex   r3                    ; set device select (r8.1)
-            out   IDE_SELECT
-            db    IDE_R_HEAD
-            sex   r2
-            out   IDE_DATA
-
-            sex   r3                    ; set read or write command
+            sex   r3                     ; execute read or write command
             out   IDE_SELECT
             db    IDE_R_CMND
             sex   r2
@@ -1470,7 +1592,7 @@ idebusy:    inp   IDE_DATA              ; wait until drive not busy
             ani   IDE_S_ERR
             bnz   idepop
 
-            ldn   r2
+            ldn   r2                    ; jumnp to dmawrt or dmaread
             plo   r3
 
 idepop:     lda   r2                    ; get saved status register value
@@ -1547,11 +1669,10 @@ boot:       ldi   stack.1               ; setup stack for mark opcode
             lbr   initcall              ; jump to initialization
 
 ideboot:    sep   scall                 ; initialize disk device
-          #ifdef USE_SDCARD
             dw    sdreset
-          #else
-            dw    iderst
-          #endif
+
+            sep   scall
+            dw    cfreset
 
             ldi   bootpg.1              ; load boot sector to $0100
             phi   rf
@@ -1566,11 +1687,7 @@ ideboot:    sep   scall                 ; initialize disk device
             phi   r8
 
             sep   scall                 ; read boot sector from disk
-          #ifdef USE_SDCARD
-            dw    sdread
-          #else
-            dw    ideread
-          #endif
+            dw    diskrd
 
             lbr   bootpg+6              ; jump to entry point
 
@@ -2418,7 +2535,8 @@ sdreset:    glo   r3                    ; save and intialize registers
             glo   r3                    ; initialize sd card to spi mode
             br    spiinit 
 
-            br    sdfinal               ; all done, return
+            adi   0                     ; return with df clear
+            br    sdfinal
 
 
           ; SDREAD reads a block from the SD Card; the block address is passed
@@ -2427,6 +2545,10 @@ sdreset:    glo   r3                    ; save and intialize registers
           ; read command times out or returns a card busy status, it means
           ; that the card is not in SPI mode and was probably just inserted,
           ; so the card is initialized and the read then re-tried.
+
+sdprird:    ghi   r8                    ; if second drive, do sdcard
+            ani   1fh
+            lbnz  cfread
 
 sdread:     glo   r3                    ; save and initialize registers
             br    sdsetup               ;  if busy then re-initialize
@@ -2457,7 +2579,8 @@ rdblock:    sep   r9                    ; receive data block start token
             sep   r9                    ; get 512 data bytes to buffer
             db    recvbuf
 
-            br    sdfinal               ; return with df clear
+            adi   0                     ; return with df clear
+            br    sdfinal
 
 
           ; SDWRITE writes a block to the SD Card; the block address is passed 
@@ -2471,6 +2594,10 @@ rdblock:    sep   r9                    ; receive data block start token
           ; happened as a result of a card that was swapped while a file was
           ; open. So, it seems safer to let these fail.
  
+sdpriwr:    ghi   r8                    ; if second drive, do sdcard
+            ani   1fh
+            lbnz  cfwrite
+
 sdwrite:    glo   r3                    ; save and initialize registers
             br    sdsetup               ;  if busy then it's an error
             bdf   reinit
@@ -2504,7 +2631,8 @@ sdwrite:    glo   r3                    ; save and initialize registers
             lda   r2                    ; not zero is an error
             bnz   sderror
 
-            br    sdfinal               ; return with df clear
+            adi   0                     ; return with df clear
+            br    sdfinal
 
 
           ; SDSETUP saves the registers we use and presets R9 for subroutine
@@ -2963,15 +3091,9 @@ f_drive:    lbr   0
 f_setbd:    lbr   setbd
 f_mul16:    lbr   mul16
 f_div16:    lbr   div16
-          #ifdef USE_SDCARD
-f_iderst:   lbr   sdreset
-f_idewrt:   lbr   sdwrite
-f_ideread:  lbr   sdread
-          #else
-f_iderst:   lbr   iderst
-f_idewrt:   lbr   idewrt
-f_ideread:  lbr   ideread
-          #endif
+f_iderst:   lbr   error
+f_idewrt:   lbr   diskwr
+f_ideread:  lbr   diskrd
 f_initcall: lbr   initcall
 f_ideboot:  lbr   ideboot
 f_hexin:    lbr   hexin
