@@ -1191,7 +1191,7 @@ todhold:    out   RTC_PORT              ; set hold bit
 
             glo   rc                    ; save so we can use as table pointer
             stxd
-            ghi   rd
+            ghi   rc
             stxd
 
             ghi   r3                    ; get pointer to register table
@@ -1416,6 +1416,8 @@ numret:     glo   re                    ; restore and return
 
             ; IDE head register bits
 
+#define IDE_H_DR0   000h
+#define IDE_H_DR1   010h
 #define IDE_H_CHS   0a0h
 #define IDE_H_LBA   0e0h
 
@@ -1429,37 +1431,42 @@ numret:     glo   re                    ; restore and return
 
 #define IDE_F_8BIT  01h                 ; 8-bit mode
 
-cfreset:    sex   r3                    ; use inline arguments
+
+cfreset:    sex   r3
 
           #if IDE_GROUP
-            out   EXP_PORT              ; select ide port group
+            out   EXP_PORT              ; set ide expander group
             db    IDE_GROUP
           #endif
 
-            sep   scall                 ; wait until drive ready
-            dw    waitrdy
-            bdf   ideret
+            glo   r3
+            br    waitbsy
 
-            sex   r3                    ; use inline arguments
+            glo   r3
+            br    drivrdy
+            bdf   return
 
-            out   IDE_SELECT            ; select lba mode and drive 0
-            db    IDE_R_HEAD
-            out   IDE_DATA
-            db    IDE_H_LBA
-
-            out   IDE_SELECT            ; enable feature 8 bit mode
+            sex   r3                     ; enable feature 8 bit mode
+            out   IDE_SELECT
             db    IDE_R_FEAT
             out   IDE_DATA
-            db    IDE_F_8BIT 
+            db    IDE_F_8BIT
 
             out   IDE_SELECT            ; send set feature command
             db    IDE_R_CMND
             out   IDE_DATA
-            db    IDE_C_FEAT 
+            db    IDE_C_FEAT
 
-waitret:    sep   scall
-            dw    waitrdy
-ideret:
+waitret:    glo   r3
+            br    waitbsy
+
+            glo   r3
+            br    waitrdy
+            bdf   return
+
+            ldn   r2
+            shr
+return:
           #if IDE_GROUP
             sex   r3
             out   EXP_PORT              ; leave as default group
@@ -1469,95 +1476,104 @@ ideret:
             sep   sret
 
 
-waitrdy:    sex   r3
+          ; Subroutine to check if its safe to access registers by waiting
+          ; for the ready bit cleared in the status register. On the Pico/Elf
+          ; the value of the INP instruction that is deposited in D is not
+          ; reliable, so use the data written to memory at M(RX) instead.
 
-            out   IDE_SELECT            ; select status register
+waitbsy:    adi   2                     ; get return address
+            plo   re
+
+            sex   r3                    ; select status register
+            out   IDE_SELECT
             db    IDE_R_STAT
 
-            sex   r2                    ; inp result to stack
+            sex   r2
+bsyloop:    inp   IDE_DATA              ; get register, read from memory
+            ldx                         ;  not from d register, important
+            ani   IDE_S_BUSY
+            bnz   bsyloop
 
-looprdy:    inp   IDE_DATA              ; wait for rdy set and bsy clear
-            xri   IDE_S_RDY
-            ani   IDE_S_RDY+IDE_S_BUSY
-            bnz   looprdy
-
-            ldn   r2                    ; error if err is set
-            ani   IDE_S_ERR
-            bnz   rdyerr
-
-            ldn   r2                    ; get status back, return success
-            adi   0
-            sep   sret
-
-rdyerr:     sex   r3                    ; select error register
-            out   IDE_SELECT
-            db    IDE_R_ERROR
-
-            sex   r2                    ; inp result onto stack
-
-            inp   IDE_DATA              ; get error status, return failure
-            smi   0
-            sep   sret
+            glo   re                    ; return
+            plo   r3
 
 
-            ; Disk read and write share mostly common code, there is just a
-            ; difference in two varaibles: what command to send to the drive
-            ; and what DMA direction to enable for the transfer. So we just
-            ; set these onto the stack appropriately before the routine.
+          ; Subroutine to select drive zero always and then wait for the
+          ; ready bit to be set by juming into WAITRDY afterwards.
 
-            ; Write operations use the IDE write command and DMA OUT.
+drivrdy:    adi   2                     ; get return address
+            plo   re
 
-cfpriwr:    ghi   r8                    ; if second drive, do sdcard
-            ani   1fh
-            lbnz  sdwrite
+            sex   r3
+            out   IDE_SELECT            ; select head, jump based on drive
+            db    IDE_R_HEAD
 
-cfwrite:    ldi   dmawrt.0              ; address of write routine
-            stxd
-            ldi   IDE_C_WRITE           ; write sector command
-            stxd
+            out   IDE_DATA              ; select drive zero, jump to wait
+            db    IDE_H_LBA+IDE_H_DR0   ;  for ready bit
 
-            br    execide               ; jump to disk routine
- 
-            ; Read operations use the IDE read command and DMA IN.
+            br    statsel
 
-cfprird:    ghi   r8                    ; if second drive, do sdcard
-            ani   1fh
-            lbnz  sdread
 
-cfread:     ldi   dmard.0               ; address of read routine
-            stxd
-            ldi   IDE_C_READ            ; read sector command
-            stxd
+          ; Subroutine to wait for ready bit set on current drive. See the
+          ; note under WAITBSY regarding INP of the status register.
 
-            ; Now the working part of the disk routine for the transfer.
- 
-execide:    sex   r3                    ; inline out arguments
+waitrdy:    adi   2                     ; get return address
+            plo   re
 
-          #if IDE_GROUP
-            out   EXP_PORT              ; set ide expander group
-            db    IDE_GROUP
-          #endif
+            sex   r3
+statsel:    out   IDE_SELECT            ; select status register
+            db    IDE_R_STAT
 
-            sep   scall                 ; be sure drive is ready
-            dw    waitrdy
-            bdf   idepop
+            sex   r2                    ; input to stack
 
-            glo   r8                    ; push lba high byte
-            stxd
-            ghi   r7                    ; push lba middle byte
-            stxd
-            glo   r7                    ; push lba low byte
-            str   r2
+rdyloop:    inp   IDE_DATA              ; if status register is zero,
+            ldx                         ;  second drive is not present
+            bz    waiterr
 
-            sex   r3                    ; set sector count to one
+            ani   IDE_S_RDY             ; wait until rdy bit is set
+            bz    rdyloop
+
+            adi   0                     ; return success
+            glo   re
+            plo   r3
+
+waiterr:    smi   0                     ; return failure
+            glo   re
+            plo   r3
+
+
+          ; Setup read or write operation on drive.
+
+ideblock:   stxd                        ; save command value
+
+            glo   r3                    ; wait until not busy
+            br    waitbsy
+
+            glo   r3                    ; wait until drive ready, error if
+            br    drivrdy               ;  drive is not present
+            bnf   isready
+
+            inc   r2                    ; discard command and code address
+            inc   r2                    ;  and return failure
+            br    return
+
+isready:    sex   r3                    ; set sector count to one
             out   IDE_SELECT
             db    IDE_R_COUNT
             out   IDE_DATA
             db    1
 
-            out   IDE_SELECT            ; set lba low byte (r7.0)
+            out   IDE_SELECT            ; select lba low byte register
             db    IDE_R_SECT
-            sex   r2
+
+            sex   r2                    ; push the lba high and middle
+            glo   r8                    ;  bytes onto the stack
+            stxd
+            ghi   r7
+            stxd
+
+            glo   r7                    ; set lba low byte (r7.0)
+            str   r2
             out   IDE_DATA
 
             sex   r3                    ; set lba middle byte (r7.1)
@@ -1571,43 +1587,60 @@ execide:    sex   r3                    ; inline out arguments
             db    IDE_R_CYLHI
             sex   r2
             out   IDE_DATA
- 
+
             sex   r3                     ; execute read or write command
             out   IDE_SELECT
             db    IDE_R_CMND
             sex   r2
             out   IDE_DATA
 
-            dec   r2                    ; make room for inp value
+            dec   r2                    ; make room for input value
 
-idebusy:    inp   IDE_DATA              ; wait until drive not busy
+drvbusy:    inp   IDE_DATA              ; wait until drive not busy, read
+            ldx                         ;  from memory, not from d
             ani   IDE_S_BUSY
-            bnz   idebusy
+            bnz   drvbusy
 
-            ldn   r2                    ; wait until drq or err is set
+            ldx                         ; wait until drq or err is set
             ani   IDE_S_DRQ+IDE_S_ERR
-            bz    idebusy
+            bz    drvbusy
 
-            lda   r2                    ; if error then return failure
-            ani   IDE_S_ERR
-            bnz   idepop
+            inc   r2                    ; discard status register value,
+            shr                         ;  return error if err bit set
+            bdf   return
 
-            ldn   r2                    ; jumnp to dmawrt or dmaread
+            ldn   r2                    ; jump to dmawrt or dmaread
             plo   r3
 
-idepop:     lda   r2                    ; get saved status register value
-            inc   r2
 
-          #if IDE_GROUP
-            sex   r3
-            out   EXP_PORT              ; set ide expander group
-            db    IDE_GROUP
-          #endif
+          ; Disk read and write share mostly common code, there is just a
+          ; difference in two varaibles: what command to send to the drive
+          ; and what DMA direction to enable for the transfer. So we just
+          ; set these onto the stack appropriately before the routine.
 
-error:      smi   0
-            sep   sret                  ; return to caller
+cfprird:    ghi   r8                    ; if second drive, do sdcard
+            ani   1fh
+            shr
+            lbnz  error
+            lbdf  sdread
 
-dmawrt:     glo   rf                    ; set dma pointer to data buffer
+cfread:     ldi   dodmard.0             ; address of dma input routine
+            stxd
+            ldi   IDE_C_READ            ; read sector command
+            br    ideblock
+
+cfpriwr:    ghi   r8                    ; if second drive, do sdcard
+            ani   1fh
+            shr
+            lbnz  error
+            lbdf  sdwrite
+
+cfwrite:    ldi   dodmawr.0             ; address of dma output routine
+            stxd
+            ldi   IDE_C_WRITE           ; write sector command
+            br    ideblock
+
+dodmawr:    glo   rf                    ; set dma pointer to data buffer
             plo   r0
             ghi   rf
             phi   r0
@@ -1624,8 +1657,7 @@ dmawrt:     glo   rf                    ; set dma pointer to data buffer
 
             br    waitret
 
-
-dmard:      glo   rf                    ; set dma pointer to data buffer
+dodmard:    glo   rf                    ; set dma pointer to data buffer
             plo   r0
             str   r2                    ; put lsb on stack for compare later
             ghi   rf
@@ -1634,12 +1666,12 @@ dmard:      glo   rf                    ; set dma pointer to data buffer
             adi   2                     ; advance buffer pointer past end
             phi   rf
 
-            ldn   rf                    ; save byte just past end of buffer
-            plo   re
-
             sex   r3                    ; set dma count to one sector
             out   IDE_SELECT
             db    IDE_A_COUNT+1
+
+            ldn   rf                    ; save byte just past end of buffer
+            plo   re
 
             out   IDE_SELECT            ; start dma input operation
             db    IDE_A_DMAIN
@@ -1668,10 +1700,11 @@ boot:       ldi   stack.1               ; setup stack for mark opcode
 
             lbr   initcall              ; jump to initialization
 
-ideboot:    sep   scall                 ; initialize disk device
+
+ideboot:    sep   scall                 ; initialize sd drive
             dw    sdreset
 
-            sep   scall
+            sep   scall                 ; initialize cf drive
             dw    cfreset
 
             ldi   bootpg.1              ; load boot sector to $0100
@@ -1683,75 +1716,13 @@ ideboot:    sep   scall                 ; initialize disk device
             phi   r7
             plo   r8
 
-            ldi   IDE_H_LBA             ; set lba mode
+            ldi   0e0h                  ; set lba mode
             phi   r8
 
             sep   scall                 ; read boot sector from disk
             dw    diskrd
 
             lbr   bootpg+6              ; jump to entry point
-
-
-            ; Return the address of the last byte of RAM. This returns the
-            ; RAM size that was discovered at boot rather than discovering
-            ; each time or having a built-in value. As a side effect, this
-            ; also updates the kernel variable containing the processor clock
-            ; frequency since there is no other way for that to happen
-            ; currently and this is a way to make it happen at start-up.
-
-freemem:    ghi   re                    ; we only need to half-save for temp
-            stxd
-
-            ldi   clkfreq.1             ; get address of bios variable
-            phi   re
-            ldi   clkfreq.0
-            plo   re
-
-            ldi   k_clkfreq.1           ; get address of kernel variable
-            phi   rf
-            ldi   k_clkfreq.0
-            plo   rf
-
-            lda   re                    ; update kernel with clock freq
-            str   rf
-            inc   rf
-            lda   re
-            str   rf
-
-            br    retvar                ; return freemem in rf
-
-
-            ; Return a bitmap of devices present in the system. This now
-            ; gives devices actually present, rather than just what has
-            ; support in the BIOS. This is discovered at boot time and then
-            ; that value is returned whenever requested.
-
-            ;   0: IDE-like disk device
-            ;   1: Floppy (no longer relevant)
-            ;   2: Bit-banged serial
-            ;   3: UART-based serial
-            ;   4: Real-time clock
-            ;   5: Non-volatile RAM
-
-getdev:     ghi   re                    ; we only need to half-save for temp
-            stxd
-
-            ldi   devbits.1             ; get address of device bitmap
-            phi   re
-            ldi   devbits.0
-            plo   re
-
-retvar:     lda   re                    ; return variable value in rf
-            phi   rf
-            lda   re
-            plo   rf
-
-            inc   r2                    ; restore re.1 from temp use
-            ldn   r2
-            phi   re
-
-            sep   sret                  ; return to caller
-
 
 
           #if $ > 0fb00h
@@ -2548,7 +2519,9 @@ sdreset:    glo   r3                    ; save and intialize registers
 
 sdprird:    ghi   r8                    ; if second drive, do sdcard
             ani   1fh
-            lbnz  cfread
+            shr
+            lbnz  error
+            lbdf  cfread
 
 sdread:     glo   r3                    ; save and initialize registers
             br    sdsetup               ;  if busy then re-initialize
@@ -2596,7 +2569,9 @@ rdblock:    sep   r9                    ; receive data block start token
  
 sdpriwr:    ghi   r8                    ; if second drive, do sdcard
             ani   1fh
-            lbnz  cfwrite
+            shr
+            lbnz  error
+            lbdf  cfwrite
 
 sdwrite:    glo   r3                    ; save and initialize registers
             br    sdsetup               ;  if busy then it's an error
@@ -2775,6 +2750,7 @@ sdfinal:    sex   r3                    ; output inline data
             phi   re
 
             sep   sret                  ; return to caller
+
 
 
           #if $ > 0fe00h
@@ -3065,6 +3041,73 @@ dmaloop:    out   SPI_CTRL              ; start burst by loading counter
 
             glo   re                    ; return to caller
             plo   r9
+
+
+            ; Return the address of the last byte of RAM. This returns the
+            ; RAM size that was discovered at boot rather than discovering
+            ; each time or having a built-in value. As a side effect, this
+            ; also updates the kernel variable containing the processor clock
+            ; frequency since there is no other way for that to happen
+            ; currently and this is a way to make it happen at start-up.
+
+freemem:    ghi   re                    ; we only need to half-save for temp
+            stxd
+
+            ldi   clkfreq.1             ; get address of bios variable
+            phi   re
+            ldi   clkfreq.0
+            plo   re
+
+            ldi   k_clkfreq.1           ; get address of kernel variable
+            phi   rf
+            ldi   k_clkfreq.0
+            plo   rf
+
+            lda   re                    ; update kernel with clock freq
+            str   rf
+            inc   rf
+            lda   re
+            str   rf
+
+            br    retvar                ; return freemem in rf
+
+
+            ; Return a bitmap of devices present in the system. This now
+            ; gives devices actually present, rather than just what has
+            ; support in the BIOS. This is discovered at boot time and then
+            ; that value is returned whenever requested.
+
+            ;   0: IDE-like disk device
+            ;   1: Floppy (no longer relevant)
+            ;   2: Bit-banged serial
+            ;   3: UART-based serial
+            ;   4: Real-time clock
+            ;   5: Non-volatile RAM
+
+getdev:     ghi   re                    ; we only need to half-save for temp
+            stxd
+
+            ldi   devbits.1             ; get address of device bitmap
+            phi   re
+            ldi   devbits.0
+            plo   re
+
+retvar:     lda   re                    ; return variable value in rf
+            phi   rf
+            lda   re
+            plo   rf
+
+            inc   r2                    ; restore re.1 from temp use
+            ldn   r2
+            phi   re
+
+            sep   sret                  ; return to caller
+
+
+
+error:      smi   0
+            sep   sret
+
 
 
           #if $ > 0ff00h
