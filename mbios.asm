@@ -1255,6 +1255,7 @@ numret:     glo   re                    ; restore and return
             #error Page F900 overflow
           #endif
 
+
             org   0fa00h
 
             ; Bits in CF interface address port
@@ -1285,6 +1286,8 @@ numret:     glo   re                    ; restore and return
 
             ; IDE head register bits
 
+#define IDE_H_DR0   000h
+#define IDE_H_DR1   010h
 #define IDE_H_CHS   0a0h
 #define IDE_H_LBA   0e0h
 
@@ -1299,38 +1302,41 @@ numret:     glo   re                    ; restore and return
 #define IDE_F_8BIT  01h                 ; 8-bit mode
 
 
-
-iderst:     sex   r3                    ; use inline arguments
+cfreset:    sex   r3
 
           #if IDE_GROUP
-            out   EXP_PORT              ; select ide port group
+            out   EXP_PORT              ; set ide expander group
             db    IDE_GROUP
           #endif
 
-            sep   scall                 ; wait until drive ready
-            dw    waitrdy
-            bdf   ideret
+            glo   r3
+            br    waitbsy
 
-            sex   r3                    ; use inline arguments
+            glo   r3
+            br    drivrdy
+            bdf   return
 
-            out   IDE_SELECT            ; select lba mode and drive 0
-            db    IDE_R_HEAD
-            out   IDE_DATA
-            db    IDE_H_LBA
-
-            out   IDE_SELECT            ; enable feature 8 bit mode
+            sex   r3                     ; enable feature 8 bit mode
+            out   IDE_SELECT
             db    IDE_R_FEAT
             out   IDE_DATA
-            db    IDE_F_8BIT 
+            db    IDE_F_8BIT
 
             out   IDE_SELECT            ; send set feature command
             db    IDE_R_CMND
             out   IDE_DATA
-            db    IDE_C_FEAT 
+            db    IDE_C_FEAT
 
-waitret:    sep   scall
-            dw    waitrdy
-ideret:
+waitret:    glo   r3
+            br    waitbsy
+
+            glo   r3
+            br    waitrdy
+            bdf   return
+
+            ldn   r2
+            shr
+return:
           #if IDE_GROUP
             sex   r3
             out   EXP_PORT              ; leave as default group
@@ -1340,90 +1346,104 @@ ideret:
             sep   sret
 
 
-waitrdy:    sex   r3
+          ; Subroutine to check if its safe to access registers by waiting
+          ; for the ready bit cleared in the status register. On the Pico/Elf
+          ; the value of the INP instruction that is deposited in D is not
+          ; reliable, so use the data written to memory at M(RX) instead.
 
-            out   IDE_SELECT            ; select status register
+waitbsy:    adi   2                     ; get return address
+            plo   re
+
+            sex   r3                    ; select status register
+            out   IDE_SELECT
             db    IDE_R_STAT
 
-            sex   r2                    ; inp result to stack
+            sex   r2
+bsyloop:    inp   IDE_DATA              ; get register, read from memory
+            ldx                         ;  not from d register, important
+            ani   IDE_S_BUSY
+            bnz   bsyloop
 
-looprdy:    inp   IDE_DATA              ; wait for rdy set and bsy clear
-            xri   IDE_S_RDY
-            ani   IDE_S_RDY+IDE_S_BUSY
-            bnz   looprdy
+            glo   re                    ; return
+            plo   r3
 
-            ldn   r2                    ; error if err is set
-            ani   IDE_S_ERR
-            bnz   rdyerr
 
-            ldn   r2                    ; get status back, return success
-            adi   0
-            sep   sret
+          ; Subroutine to select drive zero always and then wait for the
+          ; ready bit to be set by juming into WAITRDY afterwards.
 
-rdyerr:     sex   r3                    ; select error register
+drivrdy:    adi   2                     ; get return address
+            plo   re
+
+            sex   r3
+            out   IDE_SELECT            ; select head, jump based on drive
+            db    IDE_R_HEAD
+
+            out   IDE_DATA              ; select drive zero, jump to wait
+            db    IDE_H_LBA+IDE_H_DR0   ;  for ready bit
+
+            br    statsel
+
+
+          ; Subroutine to wait for ready bit set on current drive. See the
+          ; note under WAITBSY regarding INP of the status register.
+
+waitrdy:    adi   2                     ; get return address
+            plo   re
+
+            sex   r3
+statsel:    out   IDE_SELECT            ; select status register
+            db    IDE_R_STAT
+
+            sex   r2                    ; input to stack
+
+rdyloop:    inp   IDE_DATA              ; if status register is zero,
+            ldx                         ;  second drive is not present
+            bz    waiterr
+
+            ani   IDE_S_RDY             ; wait until rdy bit is set
+            bz    rdyloop
+
+            adi   0                     ; return success
+            glo   re
+            plo   r3
+
+waiterr:    smi   0                     ; return failure
+            glo   re
+            plo   r3
+
+
+          ; Setup read or write operation on drive.
+
+ideblock:   stxd                        ; save command value
+
+            glo   r3                    ; wait until not busy
+            br    waitbsy
+
+            glo   r3                    ; wait until drive ready, error if
+            br    drivrdy               ;  drive is not present
+            bnf   isready
+
+            inc   r2                    ; discard command and code address
+            inc   r2                    ;  and return failure
+            br    return
+
+isready:    sex   r3                    ; set sector count to one
             out   IDE_SELECT
-            db    IDE_R_ERROR
-
-            sex   r2                    ; inp result onto stack
-
-            inp   IDE_DATA              ; get error status, return failure
-            smi   0
-            sep   sret
-
-
-            ; Disk read and write share mostly common code, there is just a
-            ; difference in two varaibles: what command to send to the drive
-            ; and what DMA direction to enable for the transfer. So we just
-            ; set these onto the stack appropriately before the routine.
-
-            ; Write operations use the IDE write command and DMA OUT.
-
-idewrt:     ldi   dmawrt.0              ; address of write routine
-            stxd
-            ldi   IDE_C_WRITE           ; write sector command
-            stxd
-
-            br    execide               ; jump to disk routine
- 
-            ; Read operations use the IDE read command and DMA IN.
-
-ideread:    ldi   dmard.0               ; address of read routine
-            stxd
-            ldi   IDE_C_READ            ; read sector command
-            stxd
-
-            ; Now the working part of the disk routine for the transfer.
- 
-execide:    sex   r3                    ; inline out arguments
-
-          #if IDE_GROUP
-            out   EXP_PORT              ; set ide expander group
-            db    IDE_GROUP
-          #endif
-
-            sep   scall                 ; be sure drive is ready
-            dw    waitrdy
-            bdf   idepop
-
-            ghi   r8                    ; push device select
-            stxd
-            glo   r8                    ; push lba high byte
-            stxd
-            ghi   r7                    ; push lba middle byte
-            stxd
-            glo   r7                    ; push lba low byte
-            str   r2
-
-            sex   r3                    ; inline out arguments
-
-            out   IDE_SELECT            ; set sector count to one
             db    IDE_R_COUNT
             out   IDE_DATA
             db    1
 
-            out   IDE_SELECT            ; set lba low byte (r7.0)
+            out   IDE_SELECT            ; select lba low byte register
             db    IDE_R_SECT
-            sex   r2
+
+            sex   r2                    ; push the lba high and middle
+            glo   r8                    ;  bytes onto the stack
+            stxd
+            ghi   r7
+            stxd
+
+            glo   r7                    ; set lba low byte (r7.0)
+            str   r2
             out   IDE_DATA
 
             sex   r3                    ; set lba middle byte (r7.1)
@@ -1437,49 +1457,56 @@ execide:    sex   r3                    ; inline out arguments
             db    IDE_R_CYLHI
             sex   r2
             out   IDE_DATA
- 
-            sex   r3                    ; set device select (r8.1)
-            out   IDE_SELECT
-            db    IDE_R_HEAD
-            sex   r2
-            out   IDE_DATA
 
-            sex   r3                    ; set read or write command
+            sex   r3                     ; execute read or write command
             out   IDE_SELECT
             db    IDE_R_CMND
             sex   r2
             out   IDE_DATA
 
-            dec   r2                    ; make room for inp value
+            dec   r2                    ; make room for input value
 
-idebusy:    inp   IDE_DATA              ; wait until drive not busy
+drvbusy:    inp   IDE_DATA              ; wait until drive not busy, read
+            ldx                         ;  from memory, not from d
             ani   IDE_S_BUSY
-            bnz   idebusy
+            bnz   drvbusy
 
-            ldn   r2                    ; wait until drq or err is set
+            ldx                         ; wait until drq or err is set
             ani   IDE_S_DRQ+IDE_S_ERR
-            bz    idebusy
+            bz    drvbusy
 
-            lda   r2                    ; if error then return failure
-            ani   IDE_S_ERR
-            bnz   idepop
+            inc   r2                    ; discard status register value,
+            shr                         ;  return error if err bit set
+            bdf   return
 
-            ldn   r2
+            ldn   r2                    ; jump to dmawrt or dmaread
             plo   r3
 
-idepop:     lda   r2                    ; get saved status register value
-            inc   r2
 
-          #if IDE_GROUP
-            sex   r3
-            out   EXP_PORT              ; set ide expander group
-            db    IDE_GROUP
-          #endif
+          ; Disk read and write share mostly common code, there is just a
+          ; difference in two varaibles: what command to send to the drive
+          ; and what DMA direction to enable for the transfer. So we just
+          ; set these onto the stack appropriately before the routine.
 
-error:      smi   0
-            sep   sret                  ; return to caller
+cfread:     ghi   r8                    ; only drive zero
+            ani   31
+            lbnz  error
 
-dmawrt:     glo   rf                    ; set dma pointer to data buffer
+            ldi   dodmard.0             ; address of dma input routine
+            stxd
+            ldi   IDE_C_READ            ; read sector command
+            br    ideblock
+
+cfwrite:    ghi   r8                    ; only drive zero
+            ani   31
+            lbnz  error
+
+            ldi   dodmawr.0             ; address of dma output routine
+            stxd
+            ldi   IDE_C_WRITE           ; write sector command
+            br    ideblock
+
+dodmawr:    glo   rf                    ; set dma pointer to data buffer
             plo   r0
             ghi   rf
             phi   r0
@@ -1496,8 +1523,7 @@ dmawrt:     glo   rf                    ; set dma pointer to data buffer
 
             br    waitret
 
-
-dmard:      glo   rf                    ; set dma pointer to data buffer
+dodmard:    glo   rf                    ; set dma pointer to data buffer
             plo   r0
             str   r2                    ; put lsb on stack for compare later
             ghi   rf
@@ -1506,12 +1532,12 @@ dmard:      glo   rf                    ; set dma pointer to data buffer
             adi   2                     ; advance buffer pointer past end
             phi   rf
 
-            ldn   rf                    ; save byte just past end of buffer
-            plo   re
-
             sex   r3                    ; set dma count to one sector
             out   IDE_SELECT
             db    IDE_A_COUNT+1
+
+            ldn   rf                    ; save byte just past end of buffer
+            plo   re
 
             out   IDE_SELECT            ; start dma input operation
             db    IDE_A_DMAIN
@@ -1528,6 +1554,7 @@ dmard:      glo   rf                    ; set dma pointer to data buffer
             br    waitret
 
 
+
 boot:       ldi   stack.1               ; setup stack for mark opcode
             phi   r2
             ldi   stack.0
@@ -1540,25 +1567,6 @@ boot:       ldi   stack.1               ; setup stack for mark opcode
 
             lbr   initcall              ; jump to initialization
 
-ideboot:    sep   scall                 ; initialize ide drive
-            dw    iderst
-
-            ldi   bootpg.1              ; load boot sector to $0100
-            phi   rf
-            ldi   bootpg.0
-            plo   rf
-
-            plo   r7                    ; set lba sector number to 0
-            phi   r7
-            plo   r8
-
-            ldi   IDE_H_LBA             ; set lba mode
-            phi   r8
-
-            sep   scall                 ; read boot sector
-            dw    ideread
-
-            lbr   bootpg+6              ; jump to entry point
 
 
             ; Return the address of the last byte of RAM. This returns the
@@ -1997,6 +2005,27 @@ usetbd:     ani   7                     ; mask baud rate bits,
             sep   sret
 
 
+ideboot:    sep   scall                 ; initialize ide drive
+            dw    cfreset
+
+            ldi   bootpg.1              ; load boot sector to $0100
+            phi   rf
+            ldi   bootpg.0
+            plo   rf
+
+            plo   r7                    ; set lba sector number to 0
+            phi   r7
+            plo   r8
+
+            ldi   IDE_H_LBA             ; set lba mode
+            phi   r8
+
+            sep   scall                 ; read boot sector
+            dw    cfread
+
+            lbr   bootpg+6              ; jump to entry point
+
+
           #if $ > 0fc00h
             #error Page FB00 overflow
           #endif
@@ -2324,7 +2353,13 @@ back:       dec   rf
             br    inloop
            
 
-          #if $ > 0fd00h
+
+error:      smi   0
+            sep   sret
+
+
+
+          #if $ > 0ff00h
             #error Page FC00 overflow
           #endif
 
@@ -2349,9 +2384,9 @@ f_drive:    lbr   0
 f_setbd:    lbr   setbd
 f_mul16:    lbr   mul16
 f_div16:    lbr   div16
-f_iderst:   lbr   iderst
-f_idewrt:   lbr   idewrt
-f_ideread:  lbr   ideread
+f_iderst:   lbr   return
+f_idewrt:   lbr   cfwrite
+f_ideread:  lbr   cfread
 f_initcall: lbr   initcall
 f_ideboot:  lbr   ideboot
 f_hexin:    lbr   hexin
