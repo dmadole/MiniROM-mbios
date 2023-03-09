@@ -2730,7 +2730,7 @@ sderror:    smi   0                     ; set df flag to signal error
 sdfinal:    sex   r3                    ; output inline data
 
             out   SPI_CTRL              ; de-select sd card device
-            db    SPI_NONE
+            db    SPI_NONE+SPI_OUT1
 
             out   SPI_DATA              ; send clocks after de-selecting
             db    0ffh
@@ -2785,7 +2785,7 @@ spiclks:    out   SPI_DATA              ; send eight pulses, keep MOSI high
             bnz   spiclks
 
             out   SPI_CTRL              ; assert chip select to sd card
-            db    SPI_CS1
+            db    SPI_CS1+SPI_OUT1
 
 
           ; Check if the card is busy, meaning that the MISO line is low
@@ -2968,7 +2968,7 @@ sendbuf:    sex   r9                    ; inline arguments for out
             db    SPI_COUNT
 
             out   SPI_CTRL              ; enable dma out transfer mode
-            db    SPI_CS1+SPI_DMAOUT
+            db    SPI_CS1+SPI_DMAOUT+SPI_OUT1
 
             out   SPI_DATA              ; send data block start token
             db    0feh
@@ -2995,7 +2995,7 @@ recvbuf:    sex   r9                    ; inline arguments for out
             db    SPI_COUNT
 
             out   SPI_CTRL              ; enable dma-in transfer mode
-            db    SPI_CS1+SPI_DMAIN
+            db    SPI_CS1+SPI_DMAIN+SPI_OUT1
 
             out   SPI_DATA              ; prime the pump before  dma
             db    0ffh
@@ -3034,7 +3034,7 @@ dmaloop:    out   SPI_CTRL              ; start burst by loading counter
             bnz   dmaloop
        
             out   SPI_CTRL              ; disable dma mode when finished
-            db    SPI_CS1
+            db    SPI_CS1+SPI_OUT1
 
             ghi   r0                    ; update buffer pointer to end
             phi   rf
@@ -3290,4 +3290,3 @@ ret:        plo   re                    ; save d and set x to 2
 
 version:    db    2,1,0
 chsum:      db    0,0,0,0
-
