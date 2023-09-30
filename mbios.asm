@@ -762,6 +762,9 @@ a2iloop:    stxd                        ; save new digit value to stack
             glo   rd                    ; add new digit into result in rd
             add
             plo   rd
+            ghi   rd
+            adci  0
+            phi   rd
 
             lda   rf                    ; get next character
 
