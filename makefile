@@ -2,26 +2,27 @@
 none:
 	@echo Specify target as one of mini, superelf, rc1802
 
-mini: mbios.asm
-	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
-	asm02 -L -b -D1802MINI mbios.tmp
-	@rm mbios.build mbios.tmp
+mini: .mbios-mini
+superelf: .mbios-superelf
+rc1802: .mbios-rc1802
 
-superelf: mbios.asm
-	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
-	asm02 -L -b -DSUPERELF mbios.tmp
-	@rm mbios.build mbios.tmp
+.mbios-mini: mbios.asm
+	@rm -f .mbios-*
+	asm02 -L -b -D1802MINI mbios.asm
+	@rm -f mbios.build
+	@touch .mbios-mini
 
-rc1802: mbios.asm
-	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
-	asm02 -L -b -DRC1802 mbios.tmp
-	@rm mbios.build mbios.tmp
+.mbios-superelf: mbios.asm
+	@rm -f .mbios-*
+	asm02 -L -b -DSUPERELF mbios.asm
+	@rm -f mbios.build
+	@touch .mbios-superelf
 
-test: mbios.asm
-	@sed 's/^  *#/#/' mbios.asm > mbios.tmp
-	asm02 -L -b -DTEST mbios.tmp
-	@rm mbios.build mbios.tmp
+.mbios-rc1802: mbios.asm
+	@rm -f .mbios-*
+	asm02 -L -b -DRC1802 mbios.asm
+	@rm -f mbios.build
+	@touch .mbios-rc1802
 
 clean:
-	@rm -f mbios.bin mbios.lst
-
+	@rm -f mbios.bin mbios.lst .mbios-*
