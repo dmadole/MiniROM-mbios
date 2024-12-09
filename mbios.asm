@@ -728,7 +728,7 @@ nocarry:    add
 
             sep   scall                 ; output fixed prefix of message
             dw    f_inmsg
-            db    'ROM:  V.4.7.4 (Checksum ',0
+            db    'ROM:  V.4.8.0 (Checksum ',0
 
             sex   ra                    ; compare against m(ra)
 
