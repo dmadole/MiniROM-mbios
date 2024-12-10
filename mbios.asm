@@ -283,19 +283,19 @@ romboot:    sep   scall
 
             ldi   0
             sep   scall
-            dw    sdprobe
+            dw    cfprobe
 
             ldi   1
             sep   scall
-            dw    sdprobe
+            dw    cfprobe
 
             ldi   0
             sep   scall
-            dw    cfprobe
+            dw    sdprobe
 
             ldi   1
             sep   scall
-            dw    cfprobe
+            dw    sdprobe
 
             sep   scall
             dw    endprob
@@ -313,19 +313,19 @@ dskboot:    sep   scall
 
             ldi   0
             sep   scall
-            dw    sdprobe
+            dw    cfprobe
 
             ldi   1
             sep   scall
-            dw    sdprobe
+            dw    cfprobe
 
             ldi   0
             sep   scall
-            dw    cfprobe
+            dw    sdprobe
 
             ldi   1
             sep   scall
-            dw    cfprobe
+            dw    sdprobe
 
             sep   scall
             dw    endprob
