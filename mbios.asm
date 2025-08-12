@@ -18,8 +18,7 @@
 
 #define NO_GROUP       0                ; hardware defined - do not change
 
-#define UART_DETECT                     ; use uart if no bit-bang cable
-#define INIT_CON                        ; initialize console before booting
+;define UART_DETECT                     ; use uart if no bit-bang cable
 
 #ifdef 1802MINI
   #define BRMK         bn2              ; branch on serial mark
@@ -243,13 +242,17 @@ k_clkfreq:  equ   0470h                 ; processor clock frequency in khz
 
             lbr   sysinit
             lbr   rominit
+            lbr   anyinit
 
 
           ; Do some basic initialization. Branching to initcall will setup
           ; R4 and R5 for SCALL, R2 as stack pointer, and finally, R3 as PC
           ; when it returns via SRET.
 
-sysinit:    ldi   dskboot.1             ; return address for initcall
+sysinit:    ldi   IDE_H_LBA+IDE_H_DR0   ; set lba mode drive 0
+            phi   r8
+
+anyinit:    ldi   dskboot.1             ; return address for initcall
             phi   r6
             ldi   dskboot.0
             plo   r6
@@ -300,7 +303,7 @@ romboot:    sep   scall
             sep   scall
             dw    endprob
 
-            lbr   ideboot
+            lbr   anyboot
 
 
 dskboot:    sep   scall
@@ -659,10 +662,8 @@ savefrq:    inc   ra                    ; move on from device map
             db    NO_GROUP
           #endif
 
-          #ifdef INIT_CON
             sep   scall
             dw    setbd
-          #endif
 
  sep   scall
  dw    f_inmsg
@@ -728,7 +729,7 @@ nocarry:    add
 
             sep   scall                 ; output fixed prefix of message
             dw    f_inmsg
-            db    'ROM:  V.4.8.1 (Checksum ',0
+            db    'ROM:  V.4.8.2 (Checksum ',0
 
             sex   ra                    ; compare against m(ra)
 
@@ -762,9 +763,9 @@ chekbad:    sep   scall                 ; if mismatch, display checksum
 
 chekcpu:    sep   scall
             dw    f_inmsg
-            db    'BIOS: V.2.3.0 (Mini/BIOS)',13,10,0
+            db    'BIOS: V.2.3.1 (Mini/BIOS)',13,10,0
 
-            inp   0                     ; will only jump on 1802
+            db    68h                   ; will only jump on 1802
             lbr   cdp1802
 
             sep   scall                 ; output 1804/5/6 type
@@ -1876,6 +1877,11 @@ secloop:    lda   r9                     ; copy two bytes per loop
           ; Z80 ZX1 decompressor, but is completely rewriten due to how very
           ; different the 1802 instruction set and architecture is.
           ;
+          ; For background please see https://github.com/einar-saukas/ZX1
+          ;
+          ; Note that while the ZX1 algorithm is used here, the actual code
+          ; is an original work, and so the original license does not apply.
+          ;
           ; R9   - Destination pointer
           ; RA   - Last offset
           ; RB   - Copy offset
@@ -2074,9 +2080,8 @@ scnloop:    glo   rf                    ; randomize address within page
             adi   1
             phi   rf
 
-            ldi   0                     ; get contents of memory, save it,
-            xor                         ;  then complement it
-            plo   re
+            ldn   rf                    ; get contents of memory, save it,
+            plo   re                    ;  then complement it
             xri   255
 
             str   rf                    ; write complement back, then read,
@@ -2105,6 +2110,165 @@ scnwait:    glo   re                    ; wait until value just written
             sep   sret
 
 ramlast:  ; End of block copied to low memory.
+
+
+            ; Initialize CDP1854 UART port and set RE to indicate UART in use.
+            ; This was written for the 1802/Mini but is generic to the 1854
+            ; since it doesn't access the extra control register that the
+            ; 1802/Mini has. This means it runs at whatever baud rate the
+            ; hardware has setup since there isn't any software control on
+setbd:      ; a generic 1854 implementation.
+
+          #if UART_GROUP
+            sex   r3
+            out   EXP_PORT              ; make sure default expander group
+            db    UART_GROUP
+            sex   r2
+          #endif
+
+            inp   UART_STATUS           ; clear intertupt and data available
+            inp   UART_DATA
+
+            inp   UART_STATUS           ; check status bits for the uart
+            ani   %11100001
+            xri   %11000000
+
+            sex   r3                    ; 8 data bits, 1 stop bit, no parity
+            out   UART_STATUS
+            db    19h
+
+          #if UART_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    NO_GROUP
+          #endif
+
+            sex   r2                    ; if zero then there is a uart
+            phi   re
+
+            BRMK  btimalc               ; use bit-bang if a cable or no uart
+            bnz   btimalc
+
+            ldi   1                     ; else always use uart
+            phi   re
+            sep   sret
+
+
+          #ifdef SET_BAUD
+            ldi   (FREQ_KHZ*5)/(SET_BAUD/25)-23
+          #endif
+
+
+          ; If we are going to consider using the bit-banged port, then start
+          ; out by first setting the output to the correct idle state.
+
+btimalc:    SEMK                      ; Make output in correct state
+
+          ; Before waiting for a character, make sure that the line is idle
+          ; by waiting for it to stay high for at least 10x255 cycles which
+          ; would be a character time at the slowest baud rate we support.
+          ; This way we avoid timing starting in the middle of a character.
+
+timrset:    ldi   255                 ; reset count to maximum loops
+
+timidle:    plo   re                  ; decrement (inefficiently for delay)
+            dec   re
+            glo   re
+
+            BRSP  timrset             ; if goes low before zero, start over
+            bnz   timidle
+
+          ; If a UART was not detected, then we only need to wait for input
+          ; on the bit-banged EF line.
+
+            BRSP  timstrt
+            ghi   re
+
+timbang:    BRSP  timstrt
+            bnz   timbang
+
+          ; Else wait for either a start bit on the EF line or a character
+          ; at the UART, whichever comes first. Then we'll use that port.
+          ; Check the bit-banged input every-other instruction to minimize
+          ; the uncertainty so the timing is as accurate as possible.
+
+timwait:    BRSP  timstrt             ; if ef asserted, the use bit-banged
+
+            inp   UART_STATUS         ; get the uart status (check ef again)
+            BRSP  timstrt
+
+            shr                       ; move da bit to df (check ef again)
+            BRSP  timstrt
+
+            bdf   timuart             ; use uart if da set (check ef again)
+            BRMK  timwait
+
+          ; We have now seen an assertion on the bit-bang input EF line, so
+          ; start timing in units of 9 machine cycles, looking for the last
+          ; time the line is asserted before the count reaches 255. This will
+          ; be at just before the stop bit, meaning 9 bits after we started.
+          ;
+          ; Since we have counted in units of 9 cycles, the count will be
+          ; how many cycles each bit was. If we overflow the count, something
+          ; went wrong, probably the baud rate is too low, so try again.
+          ;
+          ; Note that this works on any ASCII character, all it requires is
+          ; that the highest bit is a zero (and that the format is 8 bits).
+
+timstrt:    ldi   1                   ; delay slightly to round up result
+            nop
+
+timcnt1:    phi   re                  ; save count, increment until overflow
+timcnt2:    adi   1
+            lbz   timdone
+
+            BRSP  timcnt1             ; save if asserted, else just count
+            br    timcnt2
+
+          ; We count the bit timing with a range of 8 bits, but only 7 bits
+          ; are availablein RE.1 to store it, so we use a compression scheme
+          ; that sacrifices resolution at higher counts for a larger range.
+          ;
+          ; This works by storing values of 0-62 as they are, but counts of
+          ; 63-255 are stored as 63-127. This gives single-count resolution
+          ; from 0-63, but resolution to 3 counts for 64 and above. This is
+          ; fine since more inaccuracy is tolerable at slower baud rates.
+
+timdone:    ldi   63                  ; Pre-load this value that we will 
+            plo   re                  ;  need in the calculations later
+
+            ghi   re                  ; Get timing loop value, subtract
+            smi   23                  ;  offset of 23 counts, if less than
+            bnf   timrset             ;  this, then too low, go try again
+
+            lsz                       ; Fold both 23 and 24 into zero, this
+            smi   1                   ;  adj is needed for 9600 at 1.8 Mhz
+
+            phi   re                  ; Got a good measurement, save it
+
+            smi   63                  ; Subtract 63 from time, if less than
+            bnf   timkeep             ;  this, then keep the result as-is
+
+timdiv3:    smi   3                   ; Otherwise, divide the excess part
+            inc   re                  ;  by three, adding to the 63 we saved
+            bdf   timdiv3             ;  earlier so results are 64-126
+        
+            glo   re                  ; Get result of division plus 63
+            phi   re                  ;  and save over raw measurement
+
+timkeep:    ghi   re                  ; Get final result and shift left one
+            shl                         ;  bit to make room for echo flag, then
+            adi   2+1                 ;  add 1 to baud rate and set echo flag
+
+            phi   re                  ;  then store formatted result and
+            sep   sret                ;  return to caller
+
+
+timuart:    inp   UART_DATA           ; discard port detection character
+
+            ldi   1                   ; set echo and baud=0 meaning uart
+            phi   re
+
+            sep   sret                ; return
 
 
 
@@ -3075,47 +3239,6 @@ baud300:    shlc                        ; double and add bit 3
             org   0fb00h
 
 
-            ; Initialize CDP1854 UART port and set RE to indicate UART in use.
-            ; This was written for the 1802/Mini but is generic to the 1854
-            ; since it doesn't access the extra control register that the
-            ; 1802/Mini has. This means it runs at whatever baud rate the
-            ; hardware has setup since there isn't any software control on
-setbd:      ; a generic 1854 implementation.
-
-          #ifdef UART_DETECT
-            BRMK  usebbang
-          #endif
- 
-          #if UART_GROUP
-            sex   r3
-            out   EXP_PORT              ; make sure default expander group
-            db    UART_GROUP
-            sex   r2
-          #endif
-
-            inp   UART_DATA
-            inp   UART_STATUS
-
-            inp   UART_STATUS
-            ani   2fh
-            bnz   usebbang
-
-            sex   r3
-            out   UART_STATUS
-            db    19h                 ; 8 data bits, 1 stop bit, no parity
-
-          #if UART_GROUP
-            out   EXP_PORT              ; make sure default expander group
-            db    NO_GROUP
-          #endif
-
-            ldi   1
-            phi   re
-            sep   sret
-
-usebbang:   lbr   btimalc
-
-
 ; READ54 inputs character from the 1854 UART by jumping to UREAD54 if baud
 ; rate in RE.1 is set to zero, and from the bit-banged UART otherwise.
 
@@ -3167,12 +3290,15 @@ utype:      sex   r3
             sex   r2
 
 uecho:      inp   UART_STATUS
+            xri   90h                   ;  thre is set and es- is cleared,
+            ani   90h                   ;  if not, wait until it is so
+            bnz   uecho
           #else
 utype:      inp   UART_STATUS
+            xri   90h                   ;  thre is set and es- is cleared,
+            ani   90h                   ;  if not, wait until it is so
+            bnz   utype
           #endif
-
-            shl
-            bnf   utype
 
             glo   re
             str   r2
@@ -3454,64 +3580,6 @@ initcall:   ldi     call.1             ; address of scall
             sep     r5                 ; jump to sret
 
 
-            ; Compare two strings pointed to by RF and RF and return a byte
-            ; in D indicating comparison result. If equal, D is 0, else if
-            ; RF < RD, D is -1, else if RF > RD, D is 1.
-
-strcmp:     sex   rd
-
-cmploop:    lda   rf
-            bz    strend
-
-            sm
-            inc   rd
-            bz    cmploop
-
-            bnf   cmpless
-
-            ldi   1
-cmpret:     sep   sret
-
-strend:     lda   rd
-            bz    cmpret
-
-cmpless:    ldi   -1
-            sep   sret
-
-
-
-
-            ; Copy the string pointed to by RF to RD, up to, and including,
-            ; a terminating null. Note that RF is advanced past the null,
-            ; but RD points to the null. Odd handling, but preserved from
-            ; the original implementation in case there are dependencies.
-
-strloop:    inc   rd
-
-strcpy:     lda   rf
-            str   rd
-            bnz   strloop
-
-            sep   sret
-
-
-            ; Copy memory from RF to RD for RC bytes. Only copies upwards,
-            ; so it is unsafe for RD to be within the source (although it
-            ; it ok for RF to be within the destinaton). RC is zeroed.
-
-memloop:    lda   rf
-            str   rd
-            inc   rd
-            dec   rc
-
-memcpy:     glo   rc
-            bnz   memloop
-            ghi   rc
-            bnz   memloop
-
-            sep   sret
-
-
             ; Multiply two 16-bit numbers to get a 16-bit result. The input
             ; numbers are in RF and RD and the result is returned in RB.
 
@@ -3681,7 +3749,10 @@ inloop:     sep   scall
             adi   127-32
             bdf   print
 
-            adi   32-13
+            adi   32-21
+            bz    bs
+
+            adi   21-13
             bz    cr
 
             adi   13-8
@@ -3738,11 +3809,58 @@ back:       dec   rf
             dec   rb
             inc   rc
 
+            glo   re
+            stxd
+
             sep   scall
             dw    inmsg
             db    8,32,8,0
+
+            irx
+            ldx
+            plo   re
+
+            smi   21
+            bz    bs
+
             br    inloop
-           
+
+
+runtime:    sex   r3                    ; enable banked ram
+
+          #ifdef EXP_MEMORY
+          #if RTC_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    RTC_GROUP
+          #endif
+            out   RTC_PORT
+            db    81h
+          #if RTC_GROUP
+            out   EXP_PORT              ; make sure default expander group
+            db    NO_GROUP
+          #endif
+          #endif
+
+            br    anyboot
+
+ideboot:    ldi   IDE_H_LBA+IDE_H_DR0   ; set lba mode drive 0
+            phi   r8
+
+anyboot:    ldi   sector.1              ; load boot sector to $0100
+            phi   rf
+            ldi   sector.0
+            plo   rf
+
+            plo   r7                    ; set lba sector number to 0
+            phi   r7
+            plo   r8
+
+            sep   scall                 ; read boot sector
+            dw    ideread
+
+            lbr   sector+6              ; jump to entry point
+
+
 
 
             org   0fd00h
@@ -4361,6 +4479,64 @@ sdwrctl:    db    SPI_NONE+SPI_CS1
             db    SPI_NONE+SPI_CS0
 
 
+            ; Compare two strings pointed to by RF and RF and return a byte
+            ; in D indicating comparison result. If equal, D is 0, else if
+            ; RF < RD, D is -1, else if RF > RD, D is 1.
+
+strcmp:     sex   rd
+
+cmploop:    lda   rf
+            bz    strend
+
+            sm
+            inc   rd
+            bz    cmploop
+
+            bnf   cmpless
+
+            ldi   1
+cmpret:     sep   sret
+
+strend:     lda   rd
+            bz    cmpret
+
+cmpless:    ldi   -1
+            sep   sret
+
+
+
+
+            ; Copy the string pointed to by RF to RD, up to, and including,
+            ; a terminating null. Note that RF is advanced past the null,
+            ; but RD points to the null. Odd handling, but preserved from
+            ; the original implementation in case there are dependencies.
+
+strloop:    inc   rd
+
+strcpy:     lda   rf
+            str   rd
+            bnz   strloop
+
+            sep   sret
+
+
+            ; Copy memory from RF to RD for RC bytes. Only copies upwards,
+            ; so it is unsafe for RD to be within the source (although it
+            ; it ok for RF to be within the destinaton). RC is zeroed.
+
+memloop:    lda   rf
+            str   rd
+            inc   rd
+            dec   rc
+
+memcpy:     glo   rc
+            bnz   memloop
+            ghi   rc
+            bnz   memloop
+
+            sep   sret
+
+
 
 
           #if $ > 0ff00h
@@ -4385,7 +4561,7 @@ f_rdsec:    lbr   0
 f_seek0:    lbr   0
 f_seek:     lbr   0
 f_drive:    lbr   0
-f_setbd:    lbr   setbd
+f_setbd:    lbr   return
 f_mul16:    lbr   mul16
 f_div16:    lbr   div16
 f_iderst:   lbr   return
@@ -4423,118 +4599,22 @@ error:      smi   0
             sep   sret
 
 
-          #ifdef SET_BAUD
-btimalc:    SEMK                      ; set idle state for line
+          ; The entry points call at 0FFE0h and ret at 0FFF1h are indicated in
+          ; Mike Riley's bios.inc as being deprecated, but the Elf/OS boot
+          ; sector at least still needs them to work properly, as it uses
+          ; these addresses rather than calling f_initcall. So we will keep
+          ; them, and to avoid wasted space, we'll just put the actual call
+          ; and ret code here instead of branching to them. Since they need a
+          ; a branch anyway to reset R4 or R5 on return, they can be  aligned
+          ; properly with the fixed entry points with no waste of space.
+          ;
+          ; In these routines, the push and pop operations store the MSB at
+          ; the low address as is common on the 1802. Besides consistency,
+          ; this allows for interoperability with the 1804/5/6 extended
+          ; instruction set. While this is opposite of what Mike Riley's BIOS
+          ; does, it should not be a problem, and none have been reported.
 
-            ldi   5                   ; delay more than one char
-            phi   re
-
-settles:    dec   re                  ; wait to clear receiver
-            ghi   re
-            lbnz  settles
-
-            ldi   (FREQ_KHZ*5)/(SET_BAUD/25)-23
-          #else
-
-btimalc:    SEMK                      ; Make output in correct state
-
-timersrt:   ldi   0                   ; Wait to make sure the line is idle,
-timeidle:   smi   1                   ;  so we don't try to measure in the
-            nop                         ;  middle of a character, we need to
-            BRSP  timersrt            ;  get 256 consecutive loops without
-            bnz   timeidle            ;  input asserted before this exits
-
-timestrt:   BRMK  timestrt            ; Stall here until start bit begins
-
-            nop                         ; Burn a half a loop's time here so
-            ldi   1                   ;  that result rounds up if closer
-
-timecnt1:   phi   re                  ; Count up in units of 9 machine cycles
-timecnt2:   adi   1                   ;  per each loop, remembering the last
-            lbz   timedone            ;  time that input is asserted, the
-            BRSP  timecnt1            ;  very last of these will be just
-            br    timecnt2            ;  before the start of the stop bit
-
-timedone:   ldi   63                  ; Pre-load this value that we will 
-            plo   re                  ;  need in the calculations later
-
-            ghi   re                  ; Get timing loop value, subtract
-            smi   23                  ;  offset of 23 counts, if less than
-            bnf   timersrt            ;  this, then too low, go try again
-          #endif
-
-            bz    timegood            ; Fold both 23 and 24 into zero, this
-            smi   1                   ;  adj is needed for 9600 at 1.8 Mhz
-
-timegood:   phi   re                  ; Got a good measurement, save it
-
-            smi   63                  ; Subtract 63 from time, if less than
-            bnf   timekeep            ;  this, then keep the result as-is
-
-timedivd:   smi   3                   ; Otherwise, divide the excess part
-            inc   re                  ;  by three, adding to the 63 we saved
-            bdf   timedivd            ;  earlier so results are 64-126
-        
-            glo   re                  ; Get result of division plus 63
-            phi   re                  ;  and save over raw measurement
-
-timekeep:   ghi   re                  ; Get final result and shift left one
-            shl                         ;  bit to make room for echo flag, then
-            adi   2+1                 ;  add 1 to baud rate and set echo flag
-
-            phi   re                  ;  then store formatted result and
-            sep   sret                ;  return to caller
-
-
-runtime:    sex   r3                    ; enable banked ram
-
-          #ifdef EXP_MEMORY
-          #if RTC_GROUP
-            out   EXP_PORT              ; make sure default expander group
-            db    RTC_GROUP
-          #endif
-            out   RTC_PORT
-            db    81h
-          #if RTC_GROUP
-            out   EXP_PORT              ; make sure default expander group
-            db    NO_GROUP
-          #endif
-          #endif
-
-ideboot:    ldi   sector.1              ; load boot sector to $0100
-            phi   rf
-            ldi   sector.0
-            plo   rf
-
-            plo   r7                    ; set lba sector number to 0
-            phi   r7
-            plo   r8
-
-            ldi   IDE_H_LBA+IDE_H_DR0   ; set lba mode drive 0
-            phi   r8
-
-            sep   scall                 ; read boot sector
-            dw    ideread
-
-            lbr   sector+6              ; jump to entry point
-
-
-            ; The entry points call at 0FFE0h and ret at 0FFF1h are indicated
-            ; in Mike Riley's bios.inc as being deprecated, but the Elf/OS
-            ; boot sector at least still needs them to work properly, as it
-            ; uses these addresses rather than calling f_initcall. So we will
-            ; keep them, and to avoid wasted space, we'll just put the actual
-            ; call and ret code here instead of branching to them. Since they
-            ; need a branch anyway to reset R4 or R5 on return, they can be 
-            ; aligned properly with the fixed entry points with no waste.
-            ;
-            ; IMPORTANT CHANGE -- these routines have had the push and pop
-            ; operations changed to store the MSB at the lower address as is
-            ; more usual on the 1802. This is to allow future optimization
-            ; using the 1804/5/6 extended instruction set. For now this is
-            ; considered as an experimental change while impact is assessed.
-
-            org     0ffd8h
+            org   0ffd8h
 
 callbr:     glo   r3
             plo   r6
@@ -4547,9 +4627,9 @@ callbr:     glo   r3
             glo   re
             sep   r3                    ; jump to called routine
 
-            org 0ffe0h
-
-            ; Entry point for CALL here.
+          #if $ != 0ffe0h
+          #error call is not at 0ffe0h
+          #endif
 
 call:       plo   re                    ; Save D
             sex   r2
@@ -4573,9 +4653,9 @@ retbr:      irx                         ; restore next-prior return address
             glo   re                    ; restore d and jump to return
             sep   r3                    ;  address taken from r6
 
-            org 0fff1h
-
-            ; Entry point for RET here.
+          #if $ != 0fff1h
+          #error ret is not at 0fff1h
+          #endif
 
 ret:        plo   re                    ; save d and set x to 2
             sex   r2
@@ -4587,12 +4667,12 @@ ret:        plo   re                    ; save d and set x to 2
 
             br    retbr                 ; jump back to continuation
 
-
-            org   0fff9h
+          #if $ != 0fff9h
+          #error version is not at 0fff9h
+          #endif
 
 version:    db    2,2,3
             db    0,0,0,0               ; checksum
 
             end   start
-
 
